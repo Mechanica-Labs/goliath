@@ -67,7 +67,11 @@ async function ensureRestServer() {
   managedServer = launchServer({
     pluginDir: ROOT_DIR,
     port,
-    env: CONFIG.serverEnv,
+    env: {
+      ...CONFIG.serverEnv,
+      GOLIATH_WORKSPACE: CONFIG.workspaceDir || process.cwd(),
+      GOLIATH_SCREENSHOTS_DIR: CONFIG.screenshotsDir,
+    },
     log: {
       info: (message) => log(message),
       error: (message) => log(message),
