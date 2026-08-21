@@ -57,6 +57,106 @@ export const TOOL_DEFS = [
     },
   },
   {
+    name: 'goliath_observe',
+    description: 'Capture versioned semantic state with durable node IDs, diffs, readiness, capabilities, and provenance.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tabId: { type: 'string' },
+        since: { type: 'string' },
+        goalSelector: { type: 'string' },
+      },
+      required: ['tabId'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'goliath_plan_action',
+    description: 'Create and policy-check a semantic action contract tied to one observed snapshot.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tabId: { type: 'string' },
+        snapshotId: { type: 'string' },
+        nodeId: { type: 'string' },
+        kind: { type: 'string', enum: ['click', 'type', 'type_secret', 'press'] },
+        text: { type: 'string' },
+        secretId: { type: 'string' },
+        key: { type: 'string' },
+        allowedOrigins: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['tabId', 'snapshotId', 'nodeId', 'kind'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'goliath_execute_action',
+    description: 'Execute a semantic action contract and verify caller-supplied postconditions.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tabId: { type: 'string' },
+        contractId: { type: 'string' },
+        confirm: { type: 'boolean' },
+        postconditions: { type: 'array', items: { type: 'object' } },
+      },
+      required: ['tabId', 'contractId'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'goliath_extract',
+    description: 'Extract typed data from semantic state with confidence and per-field provenance.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tabId: { type: 'string' },
+        snapshotId: { type: 'string' },
+        schema: { type: 'object' },
+      },
+      required: ['tabId', 'schema'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'goliath_handoff',
+    description: 'Pause, resume, or cancel a scoped human takeover for one tab.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tabId: { type: 'string' },
+        action: { type: 'string', enum: ['request', 'resume', 'cancel'] },
+        reason: { type: 'string' },
+      },
+      required: ['tabId', 'action'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'goliath_checkpoint',
+    description: 'Checkpoint cookies, local storage, and IndexedDB for a later isolated fork.',
+    inputSchema: {
+      type: 'object',
+      properties: { checkpointId: { type: 'string' } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'goliath_fork',
+    description: 'Create an isolated browser session from a storage checkpoint.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        checkpointId: { type: 'string' },
+        newUserId: { type: 'string' },
+        url: { type: 'string' },
+        sessionKey: { type: 'string' },
+      },
+      required: ['checkpointId', 'newUserId'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'goliath_click',
     description: 'Click an element by snapshot ref or CSS selector.',
     inputSchema: {
@@ -312,6 +412,32 @@ export function buildRequest(name, args, ctx) {
       if (args.offset != null) query.set('offset', String(args.offset));
       return { method: 'GET', path: tabPath(args.tabId, `/snapshot?${query}`), responseKind: 'snapshot' };
     }
+    case 'goliath_observe':
+      return { method: 'POST', path: tabPath(args.tabId, '/observe'), responseKind: 'json', body: { ...without(args), userId } };
+    case 'goliath_plan_action': {
+      const { snapshotId, nodeId, kind, text, secretId, key, allowedOrigins } = args;
+      return {
+        method: 'POST',
+        path: tabPath(args.tabId, '/actions/plan'),
+        responseKind: 'json',
+        body: {
+          userId,
+          snapshotId,
+          action: { nodeId, kind, text, secretId, key },
+          policy: { allowedOrigins },
+        },
+      };
+    }
+    case 'goliath_execute_action':
+      return { method: 'POST', path: tabPath(args.tabId, '/actions/execute'), responseKind: 'json', body: { ...without(args), userId } };
+    case 'goliath_extract':
+      return { method: 'POST', path: tabPath(args.tabId, '/extract'), responseKind: 'json', body: { ...without(args), userId, mode: 'semantic' } };
+    case 'goliath_handoff':
+      return { method: 'POST', path: tabPath(args.tabId, '/handoff'), responseKind: 'json', body: { ...without(args), userId } };
+    case 'goliath_checkpoint':
+      return { method: 'POST', path: `/sessions/${encodeURIComponent(userId)}/checkpoints`, responseKind: 'json', body: { ...args } };
+    case 'goliath_fork':
+      return { method: 'POST', path: `/sessions/${encodeURIComponent(userId)}/forks`, responseKind: 'json', body: { ...args } };
     case 'goliath_click':
     case 'goliath_type':
     case 'goliath_navigate':

@@ -67,9 +67,9 @@ Background state is stored in `.goliath/` beside the installed package or checko
 
 ## Agent capabilities
 
-- Observe: accessibility snapshots, screenshots, links, images, structured extraction, downloads, and tab statistics.
+- Observe: accessibility snapshots, versioned semantic state, screenshots, links, images, structured extraction, downloads, and tab statistics.
 - Act: click, type, press keys, hover, scroll, wait, select options, drag and drop, navigate, resize the viewport, and attach files.
-- Remember: isolate state by `userId`, group tabs by `sessionKey`, and restore browser profiles with the default persistence plugin.
+- Remember: isolate state by `userId`, group tabs by `sessionKey`, restore browser profiles, and fork explicit storage checkpoints.
 - Hand off: enable the optional noVNC plugin when a human must complete MFA, OAuth consent, CAPTCHA, or another visual step.
 - Integrate: use standard MCP, the REST API, or the generated OpenAPI document.
 
@@ -110,6 +110,51 @@ docker run --rm -p 9377:9377 \
 ```
 
 The normal interaction loop is: create a tab, navigate, request a snapshot, act using element references such as `e1`, then request a fresh snapshot after navigation.
+
+## Semantic state and safe actions
+
+`POST /tabs/:tabId/observe` adds a durable, versioned layer above temporary `eN` refs. It returns best-effort semantic node IDs, changes from the prior observation, readiness confidence and reasons, affordances, provenance, capability limits, and prompt-injection signals. Page content is always labeled untrusted.
+
+```bash
+# Observe. Save snapshotId and the desired node ID from this response.
+curl -sS -X POST http://127.0.0.1:9377/tabs/TAB_ID/observe \
+  -H 'Content-Type: application/json' \
+  -d '{"userId":"agent1","goalSelector":"main"}'
+
+# Plan against that exact state, then execute the returned contract.
+curl -sS -X POST http://127.0.0.1:9377/tabs/TAB_ID/actions/plan \
+  -H 'Content-Type: application/json' \
+  -d '{"userId":"agent1","snapshotId":"SNAPSHOT_ID","action":{"kind":"click","nodeId":"NODE_ID"},"policy":{"allowedOrigins":["https://example.com"]}}'
+
+curl -sS -X POST http://127.0.0.1:9377/tabs/TAB_ID/actions/execute \
+  -H 'Content-Type: application/json' \
+  -d '{"userId":"agent1","contractId":"CONTRACT_ID","confirm":true,"postconditions":[{"kind":"url_matches","pattern":"/next$"}]}'
+```
+
+Successful legacy mutations invalidate outstanding semantic contracts. Use `GET /tabs/:tabId/events?userId=agent1` for observation events and `GET /tabs/:tabId/workflow?userId=agent1` for successful semantic steps as a replayable role/name workflow.
+
+Semantic extraction binds JSON Schema properties to `x-node-id` values and returns per-field evidence, confidence, and unresolved fields. `deterministic_then_model` currently reports unresolved fields with `modelUsage: null`; it never silently sends page content to a model.
+
+### Secrets, checkpoints, forks, and human handoff
+
+Register credentials through the authenticated REST API or another trusted channel, not an agent prompt. Values are held in memory, never echoed, and `type_secret` contracts can use them only on exact allowed origins.
+
+```bash
+curl -sS -X POST http://127.0.0.1:9377/sessions/agent1/checkpoints \
+  -H 'Content-Type: application/json' -d '{"checkpointId":"before_checkout"}'
+
+curl -sS -X POST http://127.0.0.1:9377/sessions/agent1/forks \
+  -H 'Content-Type: application/json' \
+  -d '{"checkpointId":"before_checkout","newUserId":"agent1-branch","url":"https://example.com/cart"}'
+
+curl -sS -X POST http://127.0.0.1:9377/tabs/TAB_ID/handoff \
+  -H 'Content-Type: application/json' \
+  -d '{"userId":"agent1","action":"request","reason":"complete MFA"}'
+```
+
+Checkpoints contain cookies, local storage, and IndexedDB and default to `~/.goliath/checkpoints/` (`GOLIATH_CHECKPOINTS_DIR` overrides it). They do not clone live DOM, the JavaScript heap, open connections, or remote server state. Forks create isolated contexts from that state, with the explicit checkpoint taking precedence over any old persistence profile for the destination user. Human handoff pauses mutating tab routes and prevents both individual-tab and tab-group deletion until the handoff is resumed or cancelled.
+
+Semantic safety is fail-closed at the browser boundary: contracts are tied to one snapshot, domain policies run before execution, page instructions remain untrusted, and registered values are redacted from accessibility and semantic snapshots. Screenshot and arbitrary-evaluation endpoints remain privileged and can observe rendered data, so do not expose them to untrusted callers.
 
 ## Humanized input and telemetry
 

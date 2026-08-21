@@ -21,6 +21,11 @@ import {
 } from './lib/downloads.js';
 import { extractPageImages } from './lib/images.js';
 import { extractDeterministic, validateSchema as validateExtractSchema } from './lib/extract.js';
+import { extractSemantic, validateSemanticSchema } from './lib/extract.js';
+import { buildSemanticSnapshot, createReadinessTracker } from './lib/semantic.js';
+import { planAction, validateContract, verifyPostconditions } from './lib/action-contracts.js';
+import { createCheckpoint, deleteCheckpoint, listCheckpoints, readCheckpoint } from './lib/checkpoints.js';
+import { findPausedHandoff, pausedHandoff } from './lib/handoff.js';
 import { resolveUploadPaths } from './lib/upload-paths.js';
 import {
   ensureTracesDir, resolveTracePath, tracePathFor, makeTraceFilename,
@@ -1112,6 +1117,12 @@ async function closeSession(userId, session, {
     await clearSessionDownloads(session).catch(() => {});
   }
 
+  for (const group of session.tabGroups?.values?.() || []) {
+    for (const tabState of group.values()) {
+      disposeTabState(tabState, reason);
+    }
+  }
+
   await pluginEvents.emitAsync('session:destroying', { userId: key, reason });
   if (session.tracePath) {
     try {
@@ -1136,7 +1147,7 @@ async function closeAllSessions(reason, { clearDownloads = true, clearLocks = tr
   }
 }
 
-async function getSession(userId, { trace = false } = {}) {
+async function getSession(userId, { trace = false, storageState = null } = {}) {
   const key = normalizeUserId(userId);
   let session = sessions.get(key);
   
@@ -1187,6 +1198,7 @@ async function getSession(userId, { trace = false } = {}) {
         viewport: { width: 1280, height: 720 },
         permissions: ['geolocation'],
       };
+      if (storageState) contextOptions.storageState = storageState;
       // When geoip is active (proxy configured), goliath auto-configures
       // locale/timezone/geolocation from the proxy IP. Without proxy, use defaults.
       if (!CONFIG.proxy.host) {
@@ -1224,6 +1236,7 @@ async function getSession(userId, { trace = false } = {}) {
       const created = {
         context,
         tabGroups: new Map(),
+        secrets: new Map(),
         lastAccess: Date.now(),
         activeOperations: 0,
         proxySessionId: sessionProxy?.sessionId || null,
@@ -1402,6 +1415,7 @@ function destroyTab(session, tabId, reason, userId) {
     if (group.has(tabId)) {
       const tabState = group.get(tabId);
       log('warn', 'destroying stuck tab', { tabId, listItemId, toolCalls: tabState.toolCalls, reason: reason || 'unknown' });
+      disposeTabState(tabState, reason || 'destroyed');
       safePageClose(tabState.page);
       group.delete(tabId);
       if (group.size === 0) session.tabGroups.delete(listItemId);
@@ -1436,6 +1450,7 @@ async function recycleOldestTab(session, reqId, userId) {
   }
   if (!oldestTab) return null;
 
+  disposeTabState(oldestTab, 'recycled');
   await safePageClose(oldestTab.page);
   oldestGroup.delete(oldestTabId);
   if (oldestGroup.size === 0) session.tabGroups.delete(oldestGroupKey);
@@ -1504,8 +1519,57 @@ function createTabState(page) {
     pressureObservedToolCalls: 0,
     pointer: null,
     behavior: createBehaviorTracker(),
+    readinessTracker: createReadinessTracker(page),
+    semanticSnapshots: new Map(),
+    lastSemanticSnapshot: null,
+    semanticListeners: new Set(),
+    actionContracts: new Map(),
+    workflowSteps: [],
+    handoff: null,
   };
 }
+
+function disposeTabState(tabState, reason = 'closed') {
+  if (!tabState || tabState._semanticDisposed) return;
+  tabState._semanticDisposed = true;
+  tabState.readinessTracker?.dispose?.();
+  for (const listener of tabState.semanticListeners || []) {
+    try { listener({ type: 'tab_closed', reason }); } catch {}
+    try { listener.close?.(); } catch {}
+  }
+  tabState.semanticListeners?.clear?.();
+  tabState.actionContracts?.clear?.();
+}
+
+const HANDOFF_BLOCKED_PATHS = new Set([
+  '/navigate', '/click', '/type', '/press', '/scroll', '/viewport',
+  '/back', '/forward', '/refresh', '/evaluate', '/actions/execute',
+  '/hands', '/upload',
+]);
+
+app.use('/tabs/:tabId', (req, res, next) => {
+  if (!HANDOFF_BLOCKED_PATHS.has(req.path)) return next();
+  const userId = req.body?.userId || req.query?.userId;
+  const session = userId && sessions.get(normalizeUserId(userId));
+  const found = session && findTab(session, req.params.tabId);
+  const handoff = found && pausedHandoff(found.tabState);
+  if (handoff) {
+    return res.status(423).json({ error: 'tab paused for human handoff', handoff });
+  }
+
+  // A successful legacy mutation invalidates the current semantic view and all
+  // contracts planned against it. Semantic execution captures its own successor
+  // snapshot atomically and therefore manages invalidation itself.
+  if (found && req.path !== '/actions/execute') {
+    res.once('finish', () => {
+      if (res.statusCode < 400) {
+        found.tabState.lastSemanticSnapshot = null;
+        found.tabState.actionContracts.clear();
+      }
+    });
+  }
+  next();
+});
 
 /**
  * Attach a popup handler to a managed page so that popups (target=_blank,
@@ -1636,6 +1700,7 @@ async function goliathPressureCleanup(options = {}) {
       if (lockState.active || lockState.queued > 0) continue;
       if (item.tabState.navigateAbort) item.tabState.navigateAbort.abort();
       await clearTabDownloads(item.tabState).catch(() => {});
+      disposeTabState(item.tabState, 'pressure_cleanup');
       await safePageClose(item.tabState.page);
       item.group.delete(item.tabId);
       sessionTabCounts.set(item.userId, Math.max(0, (sessionTabCounts.get(item.userId) || 0) - 1));
@@ -2267,6 +2332,72 @@ async function getAriaSnapshot(page) {
   return mainYaml;
 }
 
+function annotateAriaSnapshot(ariaYaml, refs) {
+  if (!ariaYaml || !(refs instanceof Map) || refs.size === 0) return ariaYaml || '';
+  const refsByKey = new Map();
+  for (const [refId, info] of refs) {
+    refsByKey.set(`${info.role}:${info.name}:${info.nth}`, refId);
+  }
+  const counts = new Map();
+  return ariaYaml.split('\n').map(line => {
+    const match = line.match(/^(\s*-\s+)(\w+)(\s+"([^"]*)")?(.*)$/);
+    if (!match) return line;
+    const [, prefix, role, nameMatch, name, suffix] = match;
+    const normalizedRole = role.toLowerCase();
+    if (normalizedRole === 'combobox' || (name && SKIP_PATTERNS.some(pattern => pattern.test(name)))) return line;
+    if (!INTERACTIVE_ROLES.includes(normalizedRole)) return line;
+    const normalizedName = name || '';
+    const countKey = `${normalizedRole}:${normalizedName}`;
+    const nth = counts.get(countKey) || 0;
+    counts.set(countKey, nth + 1);
+    const refId = refsByKey.get(`${normalizedRole}:${normalizedName}:${nth}`);
+    return refId ? `${prefix}${role}${nameMatch || ''} [${refId}]${suffix}` : line;
+  }).join('\n');
+}
+
+function redactSecretValues(text, session) {
+  let redacted = String(text || '');
+  for (const secret of session?.secrets?.values?.() || []) {
+    if (secret?.value) redacted = redacted.split(secret.value).join('[REDACTED_SECRET]');
+  }
+  return redacted;
+}
+
+async function captureSemanticObservation(tabState, { since = null, goalSelector = null, session = null } = {}) {
+  const pageUrl = tabState.page.url();
+  let annotatedYaml;
+  if (isGoogleSerp(pageUrl)) {
+    const google = await extractGoogleSerp(tabState.page);
+    tabState.refs = google.refs;
+    annotatedYaml = google.snapshot;
+  } else {
+    tabState.refs = await refreshTabRefs(tabState, { reason: 'semantic_observe' });
+    annotatedYaml = annotateAriaSnapshot(await getAriaSnapshot(tabState.page), tabState.refs);
+  }
+  annotatedYaml = redactSecretValues(annotatedYaml, session);
+  tabState.lastSnapshot = annotatedYaml;
+  const readiness = await tabState.readinessTracker.sample({ goalSelector });
+  const previous = (since && tabState.semanticSnapshots.get(since)) || tabState.lastSemanticSnapshot || null;
+  const snapshot = buildSemanticSnapshot({ yaml: annotatedYaml, url: pageUrl, previous, readiness });
+  tabState.semanticSnapshots.set(snapshot.snapshotId, snapshot);
+  tabState.lastSemanticSnapshot = snapshot;
+  while (tabState.semanticSnapshots.size > 10) {
+    tabState.semanticSnapshots.delete(tabState.semanticSnapshots.keys().next().value);
+  }
+  const event = {
+    type: 'semantic_snapshot',
+    snapshotId: snapshot.snapshotId,
+    baseSnapshotId: snapshot.baseSnapshotId,
+    changes: snapshot.changes,
+    readiness,
+    capturedAt: snapshot.capturedAt,
+  };
+  for (const listener of tabState.semanticListeners) {
+    try { listener(event); } catch { tabState.semanticListeners.delete(listener); }
+  }
+  return snapshot;
+}
+
 function refToLocator(page, ref, refs) {
   const info = refs.get(ref);
   if (!info) return null;
@@ -2749,6 +2880,8 @@ app.post('/tabs', async (req, res) => {
  *               listItemId:
  *                 type: string
  *     responses:
+ *       423:
+ *         description: Tab paused for human handoff.
  *       200:
  *         description: Navigation result with snapshot.
  *         content:
@@ -3064,39 +3197,7 @@ app.get('/tabs/:tabId/snapshot', async (req, res) => {
       tabState.refs = await refreshTabRefs(tabState, { reason: 'snapshot' });
       const ariaYaml = await getAriaSnapshot(tabState.page);
       
-      let annotatedYaml = ariaYaml || '';
-      if (annotatedYaml && tabState.refs.size > 0) {
-        const refsByKey = new Map();
-        for (const [refId, info] of tabState.refs) {
-          const key = `${info.role}:${info.name}:${info.nth}`;
-          refsByKey.set(key, refId);
-        }
-        
-        const annotationCounts = new Map();
-        const lines = annotatedYaml.split('\n');
-        
-        annotatedYaml = lines.map(line => {
-          const match = line.match(/^(\s*-\s+)(\w+)(\s+"([^"]*)")?(.*)$/);
-          if (match) {
-            const [, prefix, role, nameMatch, name, suffix] = match;
-            const normalizedRole = role.toLowerCase();
-            if (normalizedRole === 'combobox') return line;
-            if (name && SKIP_PATTERNS.some(p => p.test(name))) return line;
-            if (INTERACTIVE_ROLES.includes(normalizedRole)) {
-              const normalizedName = name || '';
-              const countKey = `${normalizedRole}:${normalizedName}`;
-              const nth = annotationCounts.get(countKey) || 0;
-              annotationCounts.set(countKey, nth + 1);
-              const key = `${normalizedRole}:${normalizedName}:${nth}`;
-              const refId = refsByKey.get(key);
-              if (refId) {
-                return `${prefix}${role}${nameMatch || ''} [${refId}]${suffix}`;
-              }
-            }
-          }
-          return line;
-        }).join('\n');
-      }
+      const annotatedYaml = redactSecretValues(annotateAriaSnapshot(ariaYaml, tabState.refs), session);
       
       tabState.lastSnapshot = annotatedYaml;
       if (annotatedYaml) snapshotBytes.labels('full').observe(Buffer.byteLength(annotatedYaml, 'utf8'));
@@ -3127,6 +3228,352 @@ app.get('/tabs/:tabId/snapshot', async (req, res) => {
     log('error', 'snapshot failed', { reqId: req.reqId, tabId: req.params.tabId, error: err.message });
     handleRouteError(err, req, res);
   }
+});
+
+/**
+ * @openapi
+ * /tabs/{tabId}/observe:
+ *   post:
+ *     tags: [Content]
+ *     summary: Capture versioned semantic state
+ *     parameters:
+ *       - name: tabId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [userId]
+ *             properties:
+ *               userId: { type: string }
+ *               since: { type: string }
+ *               goalSelector: { type: string }
+ *     responses:
+ *       200:
+ *         description: Semantic snapshot with stable identities, diffs, readiness, and provenance.
+ *       404:
+ *         description: Tab not found.
+ */
+app.post('/tabs/:tabId/observe', express.json({ limit: '256kb' }), async (req, res) => {
+  try {
+    const { userId, since = null, goalSelector = null } = req.body;
+    if (!userId) return res.status(400).json({ error: 'userId required' });
+    const session = sessions.get(normalizeUserId(userId));
+    const found = session && findTab(session, req.params.tabId);
+    if (!found) return tabNotFoundResponse(res, req.params.tabId);
+    session.lastAccess = Date.now();
+    const snapshot = await withUserLimit(userId, () => withTabLock(req.params.tabId, () =>
+      withTimeout(captureSemanticObservation(found.tabState, { since, goalSelector, session }), requestTimeoutMs(), 'semantic_observe')
+    ));
+    pluginEvents.emit('tab:semantic', { userId, tabId: req.params.tabId, snapshotId: snapshot.snapshotId, changes: snapshot.changes.length });
+    res.json(snapshot);
+  } catch (err) {
+    log('error', 'semantic observe failed', { reqId: req.reqId, error: err.message });
+    handleRouteError(err, req, res);
+  }
+});
+
+/**
+ * @openapi
+ * /tabs/{tabId}/events:
+ *   get:
+ *     tags: [Content]
+ *     summary: Subscribe to semantic change events
+ *     parameters:
+ *       - name: tabId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: userId
+ *         in: query
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Server-sent event stream.
+ *         content:
+ *           text/event-stream:
+ *             schema: { type: string }
+ *       404:
+ *         description: Tab not found.
+ */
+app.get('/tabs/:tabId/events', async (req, res) => {
+  const userId = req.query.userId;
+  const session = userId && sessions.get(normalizeUserId(userId));
+  const found = session && findTab(session, req.params.tabId);
+  if (!found) return tabNotFoundResponse(res, req.params.tabId);
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+  const send = event => res.write(`event: semantic\ndata: ${JSON.stringify(event)}\n\n`);
+  send.close = () => res.end();
+  found.tabState.semanticListeners.add(send);
+  send({ type: 'connected', snapshotId: found.tabState.lastSemanticSnapshot?.snapshotId || null });
+  const heartbeat = setInterval(() => res.write(': keepalive\n\n'), 15_000);
+  req.on('close', () => {
+    clearInterval(heartbeat);
+    found.tabState.semanticListeners.delete(send);
+  });
+});
+
+/**
+ * @openapi
+ * /tabs/{tabId}/handoff:
+ *   get:
+ *     tags: [Browser]
+ *     summary: Get human handoff status
+ *     parameters:
+ *       - name: tabId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: userId
+ *         in: query
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Current handoff state. }
+ *       404: { description: Tab not found. }
+ *   post:
+ *     tags: [Browser]
+ *     summary: Pause for or resume after human handoff
+ *     parameters:
+ *       - name: tabId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [userId, action]
+ *             properties:
+ *               userId: { type: string }
+ *               action: { type: string, enum: [request, resume, cancel] }
+ *               reason: { type: string }
+ *     responses:
+ *       200: { description: Updated handoff state. }
+ *       404: { description: Tab not found. }
+ */
+app.get('/tabs/:tabId/handoff', async (req, res) => {
+  const session = req.query.userId && sessions.get(normalizeUserId(req.query.userId));
+  const found = session && findTab(session, req.params.tabId);
+  if (!found) return tabNotFoundResponse(res, req.params.tabId);
+  res.json({ handoff: found.tabState.handoff, vncPluginRequired: true });
+});
+
+app.post('/tabs/:tabId/handoff', async (req, res) => {
+  const { userId, action, reason = 'human assistance requested' } = req.body;
+  const session = userId && sessions.get(normalizeUserId(userId));
+  const found = session && findTab(session, req.params.tabId);
+  if (!found) return tabNotFoundResponse(res, req.params.tabId);
+  if (!['request', 'resume', 'cancel'].includes(action)) return res.status(400).json({ error: 'action must be request, resume, or cancel' });
+  const previous = found.tabState.handoff;
+  found.tabState.handoff = action === 'request' ? {
+    handoffId: `handoff_${crypto.randomUUID()}`,
+    status: 'paused',
+    reason,
+    requestedAt: new Date().toISOString(),
+  } : {
+    ...(previous || { handoffId: `handoff_${crypto.randomUUID()}`, requestedAt: new Date().toISOString() }),
+    status: action === 'resume' ? 'resumed' : 'cancelled',
+    completedAt: new Date().toISOString(),
+  };
+  pluginEvents.emit('tab:handoff', { userId, tabId: req.params.tabId, ...found.tabState.handoff });
+  res.json({ handoff: found.tabState.handoff, vncPluginRequired: true });
+});
+
+/**
+ * @openapi
+ * /tabs/{tabId}/actions/plan:
+ *   post:
+ *     tags: [Interaction]
+ *     summary: Plan and policy-check a semantic action
+ *     parameters:
+ *       - name: tabId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [userId, snapshotId, action]
+ *             properties:
+ *               userId: { type: string }
+ *               snapshotId: { type: string }
+ *               action: { type: object }
+ *               policy: { type: object }
+ *     responses:
+ *       200: { description: Action contract and policy decision. }
+ *       404: { description: Tab, snapshot, or target not found. }
+ *       409: { description: Requested snapshot is no longer current. }
+ */
+app.post('/tabs/:tabId/actions/plan', express.json({ limit: '256kb' }), async (req, res) => {
+  try {
+    const { userId, snapshotId, action, policy } = req.body;
+    if (!userId || !snapshotId || !action?.nodeId) return res.status(400).json({ error: 'userId, snapshotId, and action.nodeId are required' });
+    if (!['click', 'type', 'type_secret', 'press'].includes(action.kind)) return res.status(400).json({ error: 'action.kind must be click, type, type_secret, or press' });
+    if (action.kind === 'type_secret' && !action.secretId) return res.status(400).json({ error: 'action.secretId is required for type_secret' });
+    const session = sessions.get(normalizeUserId(userId));
+    const found = session && findTab(session, req.params.tabId);
+    if (!found) return tabNotFoundResponse(res, req.params.tabId);
+    const snapshot = found.tabState.semanticSnapshots.get(snapshotId);
+    if (!snapshot) return res.status(404).json({ error: 'semantic snapshot not found' });
+    if (found.tabState.lastSemanticSnapshot?.snapshotId !== snapshotId) {
+      return res.status(409).json({ error: 'semantic snapshot is no longer current', status: 'rejected_stale' });
+    }
+    const node = snapshot.nodes.find(item => item.id === action.nodeId);
+    if (!node) return res.status(404).json({ error: 'semantic target not found' });
+    const contract = planAction({ action, node, snapshot, policy });
+    found.tabState.actionContracts.set(contract.contractId, contract);
+    res.json(contract);
+  } catch (err) {
+    handleRouteError(err, req, res);
+  }
+});
+
+/**
+ * @openapi
+ * /tabs/{tabId}/actions/execute:
+ *   post:
+ *     tags: [Interaction]
+ *     summary: Execute and verify an action contract
+ *     parameters:
+ *       - name: tabId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [userId, contractId]
+ *             properties:
+ *               userId: { type: string }
+ *               contractId: { type: string }
+ *               confirm: { type: boolean }
+ *               postconditions: { type: array, items: { type: object } }
+ *     responses:
+ *       200: { description: Execution and verification result. }
+ *       409: { description: Contract stale, blocked, or awaiting confirmation. }
+ *       423: { description: Tab paused for human handoff. }
+ */
+app.post('/tabs/:tabId/actions/execute', express.json({ limit: '256kb' }), async (req, res) => {
+  try {
+    const { userId, contractId, confirm = false, postconditions = [] } = req.body;
+    if (!userId || !contractId) return res.status(400).json({ error: 'userId and contractId are required' });
+    const session = userId && sessions.get(normalizeUserId(userId));
+    const found = session && findTab(session, req.params.tabId);
+    if (!found) return tabNotFoundResponse(res, req.params.tabId);
+    const { tabState } = found;
+    if (tabState.handoff?.status === 'paused') return res.status(423).json({ error: 'tab paused for human handoff', handoff: tabState.handoff });
+    const contract = tabState.actionContracts.get(contractId);
+    const validation = validateContract(contract, { snapshot: tabState.lastSemanticSnapshot, confirm });
+    if (!validation.ok) return res.status(409).json(validation);
+    contract.status = 'executing';
+
+    let result;
+    try {
+      result = await withUserLimit(userId, () => withTabLock(req.params.tabId, async () => {
+        const sourceSnapshot = tabState.semanticSnapshots.get(contract.snapshotId);
+        const freshSnapshot = await captureSemanticObservation(tabState, { since: contract.snapshotId, session });
+        if (!sourceSnapshot || freshSnapshot.stateHash !== sourceSnapshot.stateHash) {
+          return { ok: false, status: 'rejected_stale', reasons: ['page_changed_since_plan'], snapshot: freshSnapshot };
+        }
+        const freshNode = freshSnapshot.nodes.find(node => node.id === contract.target.nodeId);
+        if (!freshNode || freshNode.identityConfidence < 0.75) {
+          return { ok: false, status: 'rejected_stale', reasons: ['target_missing_or_uncertain'], snapshot: freshSnapshot };
+        }
+        const ref = freshNode.ref;
+        const locator = ref && refToLocator(tabState.page, ref, tabState.refs);
+        if (!locator) return { ok: false, status: 'rejected_stale', reasons: ['target_not_resolvable'] };
+        if (contract.action.kind === 'click') await locator.click({ timeout: 10_000 });
+        else if (contract.action.kind === 'type') await locator.fill(String(contract.action.text ?? ''));
+        else if (contract.action.kind === 'type_secret') {
+          const secret = session.secrets.get(contract.action.secretId);
+          let currentOrigin = null;
+          try { currentOrigin = new URL(tabState.page.url()).origin; } catch {}
+          if (!secret || !secret.allowedOrigins.includes(currentOrigin)) {
+            return { ok: false, status: 'blocked', reasons: ['secret_missing_or_origin_not_allowed'] };
+          }
+          await locator.fill(secret.value);
+        }
+        else if (contract.action.kind === 'press') await locator.press(String(contract.action.key || 'Enter'));
+        else return { ok: false, status: 'unsupported_action', reasons: ['unsupported_action'] };
+        tabState.lastSnapshot = null;
+        const nextSnapshot = await captureSemanticObservation(tabState, { session });
+        const verification = verifyPostconditions(postconditions, { url: tabState.page.url(), snapshot: nextSnapshot });
+        tabState.workflowSteps.push({
+          kind: contract.action.kind,
+          target: { role: contract.target.role, name: contract.target.name },
+          ...(contract.action.key ? { key: contract.action.key } : {}),
+          ...(contract.action.kind === 'type_secret' ? { secretId: contract.action.secretId } : {}),
+          sourceSnapshotId: contract.snapshotId,
+          resultSnapshotId: nextSnapshot.snapshotId,
+          verified: verification.verified,
+          recordedAt: new Date().toISOString(),
+        });
+        if (tabState.workflowSteps.length > 100) tabState.workflowSteps.shift();
+        return {
+          ok: true,
+          status: postconditions.length === 0 ? 'executed_unverified' : (verification.verified ? 'executed_verified' : 'executed_but_unverified'),
+          snapshot: nextSnapshot,
+          verification,
+        };
+      }));
+    } catch (err) {
+      contract.status = 'failed_unknown_effect';
+      throw err;
+    }
+    contract.status = result.ok ? 'executed' : result.status;
+    pluginEvents.emit('tab:action:contract', { userId, tabId: req.params.tabId, contractId, status: result.status });
+    res.status(result.ok ? 200 : 409).json(result);
+  } catch (err) {
+    handleRouteError(err, req, res);
+  }
+});
+
+/**
+ * @openapi
+ * /tabs/{tabId}/workflow:
+ *   get:
+ *     tags: [Content]
+ *     summary: Compile successful contract actions into a reusable workflow
+ *     parameters:
+ *       - name: tabId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: userId
+ *         in: query
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Semantic workflow steps without secret values. }
+ *       404: { description: Tab not found. }
+ */
+app.get('/tabs/:tabId/workflow', async (req, res) => {
+  const session = req.query.userId && sessions.get(normalizeUserId(req.query.userId));
+  const found = session && findTab(session, req.params.tabId);
+  if (!found) return tabNotFoundResponse(res, req.params.tabId);
+  res.json({
+    version: 1,
+    generatedAt: new Date().toISOString(),
+    steps: found.tabState.workflowSteps,
+    replayPolicy: 're-plan every step against fresh semantic state; never replay refs directly',
+  });
 });
 
 // Wait for page ready
@@ -3243,6 +3690,8 @@ app.post('/tabs/:tabId/wait', async (req, res) => {
  *                   y:
  *                     type: number
  *     responses:
+ *       423:
+ *         description: Tab paused for human handoff.
  *       200:
  *         description: Click result with optional post-action snapshot.
  *         content:
@@ -3489,6 +3938,8 @@ app.post('/tabs/:tabId/click', async (req, res) => {
  *                 type: integer
  *                 default: 12000
  *     responses:
+ *       423:
+ *         description: Tab paused for human handoff.
  *       200:
  *         description: Files attached.
  *       400:
@@ -3670,6 +4121,8 @@ app.post('/tabs/:tabId/upload', authMiddleware(), async (req, res) => {
  *                 type: boolean
  *                 description: Press Enter after typing.
  *     responses:
+ *       423:
+ *         description: Tab paused for human handoff.
  *       200:
  *         description: Type result.
  *         content:
@@ -3816,6 +4269,8 @@ app.post('/tabs/:tabId/type', async (req, res) => {
  *                 type: string
  *                 description: Key name (e.g. "Enter", "Escape", "Tab").
  *     responses:
+ *       423:
+ *         description: Tab paused for human handoff.
  *       200:
  *         description: Key pressed.
  *         content:
@@ -3899,6 +4354,8 @@ app.post('/tabs/:tabId/press', async (req, res) => {
  *                         type: string
  *                         enum: [fast, balanced, deliberate]
  *     responses:
+ *       423:
+ *         description: Tab paused for human handoff.
  *       200:
  *         description: Scroll result.
  *         content:
@@ -4211,6 +4668,8 @@ async function executeHandStep(tabState, step, inputConfig) {
  *                         type: string
  *                         enum: [fast, balanced, deliberate]
  *     responses:
+ *       423:
+ *         description: Tab paused for human handoff.
  *       200:
  *         description: Hand result with per-step outcomes.
  *         content:
@@ -4381,6 +4840,8 @@ app.get('/tabs/:tabId/behavior', async (req, res) => {
  *                 minimum: 100
  *                 maximum: 4000
  *     responses:
+ *       423:
+ *         description: Tab paused for human handoff.
  *       200:
  *         description: Viewport set.
  *         content:
@@ -4452,6 +4913,8 @@ app.post('/tabs/:tabId/viewport', async (req, res) => {
  *               userId:
  *                 type: string
  *     responses:
+ *       423:
+ *         description: Tab paused for human handoff.
  *       200:
  *         description: Navigated back.
  *         content:
@@ -4530,6 +4993,8 @@ app.post('/tabs/:tabId/back', async (req, res) => {
  *               userId:
  *                 type: string
  *     responses:
+ *       423:
+ *         description: Tab paused for human handoff.
  *       200:
  *         description: Navigated forward.
  *         content:
@@ -4598,6 +5063,8 @@ app.post('/tabs/:tabId/forward', async (req, res) => {
  *               userId:
  *                 type: string
  *     responses:
+ *       423:
+ *         description: Tab paused for human handoff.
  *       200:
  *         description: Page refreshed.
  *         content:
@@ -5038,6 +5505,8 @@ app.get('/tabs/:tabId/stats', async (req, res) => {
  *                 type: string
  *                 description: JavaScript expression to evaluate.
  *     responses:
+ *       423:
+ *         description: Tab paused for human handoff.
  *       200:
  *         description: Evaluation result.
  *         content:
@@ -5087,17 +5556,18 @@ app.post('/tabs/:tabId/evaluate', authMiddleware(), express.json({ limit: '1mb' 
   }
 });
 
-// Structured extraction using JSON Schema with x-ref hints
+// Structured extraction using temporary refs or durable semantic node IDs
 /**
  * @openapi
  * /tabs/{tabId}/extract:
  *   post:
  *     tags: [Content]
- *     summary: Structured data extraction via JSON Schema
+ *     summary: Provenance-aware structured data extraction via JSON Schema
  *     description: |
- *       Extracts structured data from the current page using a JSON Schema whose properties
- *       carry `x-ref` hints pointing at snapshot element refs (e.g. `e1`, `e2`).  
- *       Call `GET /tabs/{tabId}/snapshot` first to populate the ref table.
+ *       Legacy mode resolves `x-ref` hints against the latest accessibility snapshot.
+ *       Semantic mode resolves durable `x-node-id` bindings against a versioned semantic
+ *       snapshot and returns confidence plus per-field evidence. Array schemas can supply
+ *       row bindings in `x-items`. No model fallback runs inside this endpoint.
  *     parameters:
  *       - name: tabId
  *         in: path
@@ -5114,33 +5584,20 @@ app.post('/tabs/:tabId/evaluate', authMiddleware(), express.json({ limit: '1mb' 
  *             properties:
  *               userId:
  *                 type: string
+ *               snapshotId:
+ *                 type: string
+ *                 description: Semantic snapshot ID returned by POST /tabs/{tabId}/observe.
+ *               mode:
+ *                 type: string
+ *                 enum: [legacy, semantic, deterministic_then_model]
+ *                 description: deterministic_then_model currently reports deterministic unresolved fields without invoking a model.
  *               schema:
  *                 type: object
  *                 description: |
- *                   JSON Schema with `type: "object"` and a `properties` map.  
- *                   Each property may include `x-ref` (a snapshot element ref) and an optional
- *                   `type` (`string`, `number`, `integer`, `boolean`).
- *                 required: [type, properties]
- *                 properties:
- *                   type:
- *                     type: string
- *                     enum: [object]
- *                   properties:
- *                     type: object
- *                     additionalProperties:
- *                       type: object
- *                       properties:
- *                         type:
- *                           type: string
- *                           enum: [string, number, integer, boolean, object, "null"]
- *                         x-ref:
- *                           type: string
- *                           description: Snapshot element ref (e.g. `e1`).
- *                   required:
- *                     type: array
- *                     items:
- *                       type: string
- *                     description: Property names that must resolve to a non-null value.
+ *                   JSON Schema with object properties or an array of objects. Each property
+ *                   may bind using `x-ref` (legacy) or `x-node-id` (semantic). Semantic array
+ *                   schemas use `x-items`, an array of property-to-node-ID binding maps.
+ *                 additionalProperties: true
  *     responses:
  *       200:
  *         description: Extraction succeeded.
@@ -5152,8 +5609,19 @@ app.post('/tabs/:tabId/evaluate', authMiddleware(), express.json({ limit: '1mb' 
  *                 ok:
  *                   type: boolean
  *                 data:
- *                   type: object
- *                   description: Extracted key-value pairs matching the input schema.
+ *                   description: Extracted object or array matching the requested schema.
+ *                 confidence:
+ *                   type: number
+ *                 evidence:
+ *                   description: Per-field source snapshot and node provenance.
+ *                 unresolvedFields:
+ *                   type: array
+ *                   items: { type: string }
+ *                 snapshotId:
+ *                   type: string
+ *                 modelUsage:
+ *                   nullable: true
+ *                   description: Reserved model-fallback usage; currently always null.
  *       400:
  *         description: Missing userId, missing schema, or invalid schema.
  *         content:
@@ -5167,7 +5635,7 @@ app.post('/tabs/:tabId/evaluate', authMiddleware(), express.json({ limit: '1mb' 
  *             schema:
  *               $ref: '#/components/schemas/Error'
  *       409:
- *         description: No refs available -- call snapshot first.
+ *         description: Requested temporary refs or semantic snapshot are unavailable.
  *         content:
  *           application/json:
  *             schema:
@@ -5201,11 +5669,12 @@ app.post('/tabs/:tabId/evaluate', authMiddleware(), express.json({ limit: '1mb' 
  */
 app.post('/tabs/:tabId/extract', express.json({ limit: '256kb' }), async (req, res) => {
   try {
-    const { userId, schema } = req.body;
+    const { userId, schema, snapshotId, mode } = req.body;
     if (!userId) return res.status(400).json({ error: 'userId is required' });
     if (!schema) return res.status(400).json({ error: 'schema is required' });
 
-    const check = validateExtractSchema(schema);
+    const semanticMode = Boolean(snapshotId || mode === 'semantic' || mode === 'deterministic_then_model');
+    const check = semanticMode ? validateSemanticSchema(schema) : validateExtractSchema(schema);
     if (!check.ok) return res.status(400).json({ error: check.error });
 
     const session = sessions.get(normalizeUserId(userId));
@@ -5215,6 +5684,16 @@ app.post('/tabs/:tabId/extract', express.json({ limit: '256kb' }), async (req, r
     session.lastAccess = Date.now();
     const { tabState } = found;
     tabState.toolCalls++; tabState.consecutiveTimeouts = 0;
+
+    if (semanticMode) {
+      let semanticSnapshot = snapshotId ? tabState.semanticSnapshots.get(snapshotId) : tabState.lastSemanticSnapshot;
+      if (!semanticSnapshot) {
+        semanticSnapshot = await withUserLimit(userId, () => withTabLock(req.params.tabId, () => captureSemanticObservation(tabState, { session })));
+      }
+      if (!semanticSnapshot) return res.status(409).json({ error: 'semantic snapshot unavailable -- call POST /tabs/:tabId/observe first' });
+      const result = extractSemantic({ schema, snapshot: semanticSnapshot });
+      return res.json({ ok: true, ...result, modelUsage: null });
+    }
 
     if (!tabState.refs || tabState.refs.size === 0) {
       return res.status(409).json({
@@ -5266,6 +5745,12 @@ app.post('/tabs/:tabId/extract', express.json({ limit: '256kb' }), async (req, r
  *               properties:
  *                 ok:
  *                   type: boolean
+ *       423:
+ *         description: Tab paused for human handoff.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
  *       404:
  *         description: Tab not found.
  *         content:
@@ -5279,9 +5764,12 @@ app.delete('/tabs/:tabId', async (req, res) => {
     if (!userId) return res.status(400).json({ error: 'userId required (query or body)' });
     const session = sessions.get(normalizeUserId(userId));
     const found = session && findTab(session, req.params.tabId);
+    const handoff = found && pausedHandoff(found.tabState);
+    if (handoff) return res.status(423).json({ error: 'tab paused for human handoff', handoff });
     if (found) {
       if (found.tabState.navigateAbort) found.tabState.navigateAbort.abort();
       await clearTabDownloads(found.tabState);
+      disposeTabState(found.tabState, 'closed');
       await safePageClose(found.tabState.page);
       found.group.delete(req.params.tabId);
       { const _l = tabLocks.get(req.params.tabId); if (_l) _l.drain(); tabLocks.delete(req.params.tabId); refreshTabLockQueueDepth(); }
@@ -5328,6 +5816,12 @@ app.delete('/tabs/:tabId', async (req, res) => {
  *                   type: boolean
  *                 closed:
  *                   type: integer
+ *       423:
+ *         description: A tab in the group is paused for human handoff.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
  *       404:
  *         description: Session not found.
  *         content:
@@ -5341,9 +5835,18 @@ app.delete('/tabs/group/:listItemId', async (req, res) => {
     if (!userId) return res.status(400).json({ error: 'userId required (query or body)' });
     const session = sessions.get(normalizeUserId(userId));
     const group = session?.tabGroups.get(req.params.listItemId);
+    const paused = findPausedHandoff(group);
+    if (paused) {
+      return res.status(423).json({
+        error: 'tab group contains a tab paused for human handoff',
+        tabId: paused.tabId,
+        handoff: paused.handoff,
+      });
+    }
     if (group) {
       for (const [tabId, tabState] of group) {
         await clearTabDownloads(tabState);
+        disposeTabState(tabState, 'group_closed');
         await safePageClose(tabState.page);
         const lock = tabLocks.get(tabId);
         if (lock) {
@@ -5578,6 +6081,245 @@ app.delete('/sessions/:userId/traces/:filename', authMiddleware(), async (req, r
   }
 });
 
+/**
+ * @openapi
+ * /sessions/{userId}/secrets:
+ *   post:
+ *     tags: [Sessions]
+ *     summary: Register a domain-scoped in-memory secret
+ *     parameters:
+ *       - name: userId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [secretId, value, allowedOrigins]
+ *             properties:
+ *               secretId: { type: string }
+ *               value: { type: string, writeOnly: true }
+ *               allowedOrigins: { type: array, items: { type: string } }
+ *     responses:
+ *       200: { description: Secret registered without echoing its value. }
+ *       404: { description: Session not found. }
+ */
+app.post('/sessions/:userId/secrets', authMiddleware(), async (req, res) => {
+  const userId = normalizeUserId(req.params.userId);
+  const session = sessions.get(userId);
+  if (!session) return res.status(404).json({ error: 'session not found' });
+  const { secretId, value, allowedOrigins } = req.body;
+  if (!/^[a-zA-Z0-9_-]{1,100}$/.test(String(secretId || '')) || typeof value !== 'string' || value.length === 0 || value.length > 10_000 || !Array.isArray(allowedOrigins) || allowedOrigins.length === 0) {
+    return res.status(400).json({ error: 'secretId, non-empty string value (max 10000 chars), and non-empty allowedOrigins are required' });
+  }
+  let normalizedOrigins;
+  try {
+    normalizedOrigins = [...new Set(allowedOrigins.map(origin => {
+      const parsed = new URL(origin);
+      if (!['http:', 'https:'].includes(parsed.protocol) || parsed.origin !== origin) throw new Error('invalid origin');
+      return parsed.origin;
+    }))];
+  } catch {
+    return res.status(400).json({ error: 'allowedOrigins must contain exact HTTP(S) origins without paths' });
+  }
+  session.secrets.set(secretId, { value, allowedOrigins: normalizedOrigins, createdAt: new Date().toISOString() });
+  pluginEvents.emit('session:secret:registered', { userId, secretId, allowedOrigins: normalizedOrigins });
+  res.json({ ok: true, secretId, allowedOrigins: normalizedOrigins });
+});
+
+/**
+ * @openapi
+ * /sessions/{userId}/secrets/{secretId}:
+ *   delete:
+ *     tags: [Sessions]
+ *     summary: Revoke an in-memory secret
+ *     parameters:
+ *       - name: userId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: secretId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Secret revoked. }
+ *       404: { description: Session or secret not found. }
+ */
+app.delete('/sessions/:userId/secrets/:secretId', authMiddleware(), async (req, res) => {
+  const session = sessions.get(normalizeUserId(req.params.userId));
+  if (!session || !session.secrets.delete(req.params.secretId)) return res.status(404).json({ error: 'secret not found' });
+  res.json({ ok: true });
+});
+
+/**
+ * @openapi
+ * /sessions/{userId}/checkpoints:
+ *   get:
+ *     tags: [Sessions]
+ *     summary: List storage-state checkpoints
+ *     parameters:
+ *       - name: userId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Checkpoint list. }
+ *   post:
+ *     tags: [Sessions]
+ *     summary: Create a storage-state checkpoint
+ *     parameters:
+ *       - name: userId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: false
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               checkpointId: { type: string }
+ *     responses:
+ *       200: { description: Checkpoint metadata and limitations. }
+ *       404: { description: Session not found. }
+ *       409: { description: Named checkpoint already exists. }
+ */
+app.get('/sessions/:userId/checkpoints', authMiddleware(), async (req, res) => {
+  try {
+    res.json({ checkpoints: await listCheckpoints(CONFIG.checkpointsDir, normalizeUserId(req.params.userId)) });
+  } catch (err) { handleRouteError(err, req, res); }
+});
+
+app.post('/sessions/:userId/checkpoints', authMiddleware(), async (req, res) => {
+  try {
+    const userId = normalizeUserId(req.params.userId);
+    const session = sessions.get(userId);
+    if (!session) return res.status(404).json({ error: 'session not found' });
+    const urls = session.context.pages().map(page => page.url());
+    const checkpoint = await createCheckpoint({
+      baseDir: CONFIG.checkpointsDir,
+      userId,
+      context: session.context,
+      checkpointId: req.body?.checkpointId,
+      metadata: { urls },
+    });
+    pluginEvents.emit('session:checkpoint', { userId, checkpointId: checkpoint.checkpointId });
+    res.json({
+      checkpointId: checkpoint.checkpointId,
+      createdAt: checkpoint.createdAt,
+      metadata: checkpoint.metadata,
+      limitations: checkpoint.limitations,
+    });
+  } catch (err) {
+    if (err.message === 'invalid checkpointId') return res.status(400).json({ error: err.message });
+    if (err.message === 'checkpoint already exists') return res.status(409).json({ error: err.message });
+    handleRouteError(err, req, res);
+  }
+});
+
+/**
+ * @openapi
+ * /sessions/{userId}/checkpoints/{checkpointId}:
+ *   delete:
+ *     tags: [Sessions]
+ *     summary: Delete a storage-state checkpoint
+ *     parameters:
+ *       - name: userId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: checkpointId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Checkpoint deleted. }
+ *       404: { description: Checkpoint not found. }
+ */
+app.delete('/sessions/:userId/checkpoints/:checkpointId', authMiddleware(), async (req, res) => {
+  try {
+    const deleted = await deleteCheckpoint(CONFIG.checkpointsDir, normalizeUserId(req.params.userId), req.params.checkpointId);
+    if (!deleted) return res.status(404).json({ error: 'checkpoint not found' });
+    res.json({ ok: true });
+  } catch (err) { handleRouteError(err, req, res); }
+});
+
+/**
+ * @openapi
+ * /sessions/{userId}/forks:
+ *   post:
+ *     tags: [Sessions]
+ *     summary: Fork a session from a storage-state checkpoint
+ *     parameters:
+ *       - name: userId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [checkpointId, newUserId]
+ *             properties:
+ *               checkpointId: { type: string }
+ *               newUserId: { type: string }
+ *               url: { type: string }
+ *               sessionKey: { type: string }
+ *     responses:
+ *       200: { description: New isolated session and tab. }
+ *       404: { description: Checkpoint not found. }
+ *       409: { description: Target session already exists. }
+ */
+app.post('/sessions/:userId/forks', authMiddleware(), async (req, res) => {
+  let forkSession = null;
+  let targetUserId = null;
+  try {
+    const sourceUserId = normalizeUserId(req.params.userId);
+    const { checkpointId, newUserId, sessionKey = 'fork', url } = req.body;
+    if (!checkpointId || !newUserId) return res.status(400).json({ error: 'checkpointId and newUserId are required' });
+    targetUserId = normalizeUserId(newUserId);
+    if (sessions.has(targetUserId)) return res.status(409).json({ error: 'target session already exists' });
+    const checkpoint = await readCheckpoint(CONFIG.checkpointsDir, sourceUserId, checkpointId);
+    if (!checkpoint) return res.status(404).json({ error: 'checkpoint not found' });
+    const targetUrl = url || checkpoint.metadata?.urls?.[0] || 'about:blank';
+    if (targetUrl !== 'about:blank') {
+      const urlError = validateUrl(targetUrl);
+      if (urlError) return res.status(400).json({ error: urlError });
+    }
+    const session = await getSession(targetUserId, { storageState: checkpoint.state });
+    forkSession = session;
+    const page = await session.context.newPage();
+    if (targetUrl !== 'about:blank') await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: NAVIGATE_TIMEOUT_MS });
+    const tabId = fly.makeTabId();
+    const tabState = createTabState(page);
+    attachDownloadListener(tabState, tabId, log, pluginEvents, targetUserId);
+    getTabGroup(session, sessionKey).set(tabId, tabState);
+    attachPopupHandler(page, targetUserId, sessionKey);
+    refreshActiveTabsGauge();
+    pluginEvents.emit('session:forked', { sourceUserId, targetUserId, checkpointId, tabId });
+    res.json({
+      ok: true,
+      userId: targetUserId,
+      tabId,
+      url: page.url(),
+      checkpointId,
+      limitations: checkpoint.limitations,
+    });
+  } catch (err) {
+    if (forkSession && targetUserId) {
+      await closeSession(targetUserId, forkSession, { reason: 'fork_failed', clearDownloads: true, clearLocks: true }).catch(() => {});
+    }
+    handleRouteError(err, req, res);
+  }
+});
+
 // Close session
 /**
  * @openapi
@@ -5712,6 +6454,7 @@ setInterval(() => {
           if (idleMs >= TAB_INACTIVITY_MS) {
             tabsReapedTotal.inc();
             log('info', 'tab reaped (inactive)', { userId, tabId, listItemId, idleMs, toolCalls: tabState.toolCalls });
+            disposeTabState(tabState, 'inactive');
             safePageClose(tabState.page);
             group.delete(tabId);
             { const _l = tabLocks.get(tabId); if (_l) _l.drain(); tabLocks.delete(tabId); }
@@ -6335,7 +7078,8 @@ app.get('/snapshot', async (req, res) => {
         return line;
       }).join('\n');
     }
-    
+
+    annotatedYaml = redactSecretValues(annotatedYaml, session);
     tabState.lastSnapshot = annotatedYaml;
     if (annotatedYaml) snapshotBytes.labels('full').observe(Buffer.byteLength(annotatedYaml, 'utf8'));
     const win = windowSnapshot(annotatedYaml, 0);
@@ -6452,6 +7196,9 @@ app.post('/act', async (req, res) => {
     }
     
     const { tabState } = found;
+    if (tabState.handoff?.status === 'paused') {
+      return res.status(423).json({ error: 'tab paused for human handoff', handoff: tabState.handoff });
+    }
     tabState.toolCalls++; tabState.consecutiveTimeouts = 0; tabState.consecutiveFailures = 0;
     
     const result = await withTabLock(targetId, async () => {
@@ -6655,6 +7402,7 @@ app.post('/act', async (req, res) => {
         }
         
         case 'close': {
+          disposeTabState(tabState, 'legacy_close');
           await safePageClose(tabState.page);
           found.group.delete(targetId);
           { const _l = tabLocks.get(targetId); if (_l) _l.drain(); tabLocks.delete(targetId); }
@@ -6666,6 +7414,10 @@ app.post('/act', async (req, res) => {
       }
     });
     
+    if (kind !== 'wait') {
+      tabState.lastSemanticSnapshot = null;
+      tabState.actionContracts.clear();
+    }
     res.json(result);
   } catch (err) {
     log('error', 'act failed', { reqId: req.reqId, kind: req.body?.kind, error: err.message });

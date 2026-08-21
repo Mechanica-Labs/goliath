@@ -633,6 +633,9 @@
                 }
               }
             }
+          },
+          "423": {
+            "description": "Tab paused for human handoff."
           }
         }
       }
@@ -736,6 +739,341 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/tabs/{tabId}/observe": {
+      "post": {
+        "tags": [
+          "Content"
+        ],
+        "summary": "Capture versioned semantic state",
+        "parameters": [
+          {
+            "name": "tabId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "userId"
+                ],
+                "properties": {
+                  "userId": {
+                    "type": "string"
+                  },
+                  "since": {
+                    "type": "string"
+                  },
+                  "goalSelector": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Semantic snapshot with stable identities, diffs, readiness, and provenance."
+          },
+          "404": {
+            "description": "Tab not found."
+          }
+        }
+      }
+    },
+    "/tabs/{tabId}/events": {
+      "get": {
+        "tags": [
+          "Content"
+        ],
+        "summary": "Subscribe to semantic change events",
+        "parameters": [
+          {
+            "name": "tabId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "userId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Server-sent event stream.",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Tab not found."
+          }
+        }
+      }
+    },
+    "/tabs/{tabId}/handoff": {
+      "get": {
+        "tags": [
+          "Browser"
+        ],
+        "summary": "Get human handoff status",
+        "parameters": [
+          {
+            "name": "tabId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "userId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current handoff state."
+          },
+          "404": {
+            "description": "Tab not found."
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Browser"
+        ],
+        "summary": "Pause for or resume after human handoff",
+        "parameters": [
+          {
+            "name": "tabId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "userId",
+                  "action"
+                ],
+                "properties": {
+                  "userId": {
+                    "type": "string"
+                  },
+                  "action": {
+                    "type": "string",
+                    "enum": [
+                      "request",
+                      "resume",
+                      "cancel"
+                    ]
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated handoff state."
+          },
+          "404": {
+            "description": "Tab not found."
+          }
+        }
+      }
+    },
+    "/tabs/{tabId}/actions/plan": {
+      "post": {
+        "tags": [
+          "Interaction"
+        ],
+        "summary": "Plan and policy-check a semantic action",
+        "parameters": [
+          {
+            "name": "tabId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "userId",
+                  "snapshotId",
+                  "action"
+                ],
+                "properties": {
+                  "userId": {
+                    "type": "string"
+                  },
+                  "snapshotId": {
+                    "type": "string"
+                  },
+                  "action": {
+                    "type": "object"
+                  },
+                  "policy": {
+                    "type": "object"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Action contract and policy decision."
+          },
+          "404": {
+            "description": "Tab",
+            "snapshot": null,
+            "or target not found.": null
+          },
+          "409": {
+            "description": "Requested snapshot is no longer current."
+          }
+        }
+      }
+    },
+    "/tabs/{tabId}/actions/execute": {
+      "post": {
+        "tags": [
+          "Interaction"
+        ],
+        "summary": "Execute and verify an action contract",
+        "parameters": [
+          {
+            "name": "tabId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "userId",
+                  "contractId"
+                ],
+                "properties": {
+                  "userId": {
+                    "type": "string"
+                  },
+                  "contractId": {
+                    "type": "string"
+                  },
+                  "confirm": {
+                    "type": "boolean"
+                  },
+                  "postconditions": {
+                    "type": "array",
+                    "items": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Execution and verification result."
+          },
+          "409": {
+            "description": "Contract stale",
+            "blocked": null,
+            "or awaiting confirmation.": null
+          },
+          "423": {
+            "description": "Tab paused for human handoff."
+          }
+        }
+      }
+    },
+    "/tabs/{tabId}/workflow": {
+      "get": {
+        "tags": [
+          "Content"
+        ],
+        "summary": "Compile successful contract actions into a reusable workflow",
+        "parameters": [
+          {
+            "name": "tabId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "userId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Semantic workflow steps without secret values."
+          },
+          "404": {
+            "description": "Tab not found."
           }
         }
       }
@@ -921,6 +1259,9 @@
                 }
               }
             }
+          },
+          "423": {
+            "description": "Tab paused for human handoff."
           }
         }
       }
@@ -1022,6 +1363,9 @@
                 }
               }
             }
+          },
+          "423": {
+            "description": "Tab paused for human handoff."
           }
         }
       }
@@ -1144,6 +1488,9 @@
                 }
               }
             }
+          },
+          "423": {
+            "description": "Tab paused for human handoff."
           }
         }
       }
@@ -1212,6 +1559,9 @@
                 }
               }
             }
+          },
+          "423": {
+            "description": "Tab paused for human handoff."
           }
         }
       }
@@ -1307,6 +1657,9 @@
                 }
               }
             }
+          },
+          "423": {
+            "description": "Tab paused for human handoff."
           }
         }
       }
@@ -1484,6 +1837,9 @@
                 }
               }
             }
+          },
+          "423": {
+            "description": "Tab paused for human handoff."
           }
         }
       }
@@ -1618,6 +1974,9 @@
                 }
               }
             }
+          },
+          "423": {
+            "description": "Tab paused for human handoff."
           }
         }
       }
@@ -1684,6 +2043,9 @@
                 }
               }
             }
+          },
+          "423": {
+            "description": "Tab paused for human handoff."
           }
         }
       }
@@ -1750,6 +2112,9 @@
                 }
               }
             }
+          },
+          "423": {
+            "description": "Tab paused for human handoff."
           }
         }
       }
@@ -1816,6 +2181,9 @@
                 }
               }
             }
+          },
+          "423": {
+            "description": "Tab paused for human handoff."
           }
         }
       }
@@ -2234,6 +2602,9 @@
                 }
               }
             }
+          },
+          "423": {
+            "description": "Tab paused for human handoff."
           }
         }
       }
@@ -2243,8 +2614,8 @@
         "tags": [
           "Content"
         ],
-        "summary": "Structured data extraction via JSON Schema",
-        "description": "Extracts structured data from the current page using a JSON Schema whose properties\ncarry `x-ref` hints pointing at snapshot element refs (e.g. `e1`, `e2`).  \nCall `GET /tabs/{tabId}/snapshot` first to populate the ref table.\n",
+        "summary": "Provenance-aware structured data extraction via JSON Schema",
+        "description": "Legacy mode resolves `x-ref` hints against the latest accessibility snapshot.\nSemantic mode resolves durable `x-node-id` bindings against a versioned semantic\nsnapshot and returns confidence plus per-field evidence. Array schemas can supply\nrow bindings in `x-items`. No model fallback runs inside this endpoint.\n",
         "parameters": [
           {
             "name": "tabId",
@@ -2269,51 +2640,23 @@
                   "userId": {
                     "type": "string"
                   },
+                  "snapshotId": {
+                    "type": "string",
+                    "description": "Semantic snapshot ID returned by POST /tabs/{tabId}/observe."
+                  },
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "legacy",
+                      "semantic",
+                      "deterministic_then_model"
+                    ],
+                    "description": "deterministic_then_model currently reports deterministic unresolved fields without invoking a model."
+                  },
                   "schema": {
                     "type": "object",
-                    "description": "JSON Schema with `type: \"object\"` and a `properties` map.  \nEach property may include `x-ref` (a snapshot element ref) and an optional\n`type` (`string`, `number`, `integer`, `boolean`).\n",
-                    "required": [
-                      "type",
-                      "properties"
-                    ],
-                    "properties": {
-                      "type": {
-                        "type": "string",
-                        "enum": [
-                          "object"
-                        ]
-                      },
-                      "properties": {
-                        "type": "object",
-                        "additionalProperties": {
-                          "type": "object",
-                          "properties": {
-                            "type": {
-                              "type": "string",
-                              "enum": [
-                                "string",
-                                "number",
-                                "integer",
-                                "boolean",
-                                "object",
-                                "null"
-                              ]
-                            },
-                            "x-ref": {
-                              "type": "string",
-                              "description": "Snapshot element ref (e.g. `e1`)."
-                            }
-                          }
-                        }
-                      },
-                      "required": {
-                        "type": "array",
-                        "items": {
-                          "type": "string"
-                        },
-                        "description": "Property names that must resolve to a non-null value."
-                      }
-                    }
+                    "description": "JSON Schema with object properties or an array of objects. Each property\nmay bind using `x-ref` (legacy) or `x-node-id` (semantic). Semantic array\nschemas use `x-items`, an array of property-to-node-ID binding maps.\n",
+                    "additionalProperties": true
                   }
                 }
               }
@@ -2332,8 +2675,26 @@
                       "type": "boolean"
                     },
                     "data": {
-                      "type": "object",
-                      "description": "Extracted key-value pairs matching the input schema."
+                      "description": "Extracted object or array matching the requested schema."
+                    },
+                    "confidence": {
+                      "type": "number"
+                    },
+                    "evidence": {
+                      "description": "Per-field source snapshot and node provenance."
+                    },
+                    "unresolvedFields": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "snapshotId": {
+                      "type": "string"
+                    },
+                    "modelUsage": {
+                      "nullable": true,
+                      "description": "Reserved model-fallback usage; currently always null."
                     }
                   }
                 }
@@ -2361,7 +2722,7 @@
             }
           },
           "409": {
-            "description": "No refs available -- call snapshot first.",
+            "description": "Requested temporary refs or semantic snapshot are unavailable.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2463,6 +2824,16 @@
                 }
               }
             }
+          },
+          "423": {
+            "description": "Tab paused for human handoff.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }
@@ -2512,6 +2883,16 @@
           },
           "404": {
             "description": "Session not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "A tab in the group is paused for human handoff.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2774,6 +3155,252 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/sessions/{userId}/secrets": {
+      "post": {
+        "tags": [
+          "Sessions"
+        ],
+        "summary": "Register a domain-scoped in-memory secret",
+        "parameters": [
+          {
+            "name": "userId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "secretId",
+                  "value",
+                  "allowedOrigins"
+                ],
+                "properties": {
+                  "secretId": {
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string",
+                    "writeOnly": true
+                  },
+                  "allowedOrigins": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Secret registered without echoing its value."
+          },
+          "404": {
+            "description": "Session not found."
+          }
+        }
+      }
+    },
+    "/sessions/{userId}/secrets/{secretId}": {
+      "delete": {
+        "tags": [
+          "Sessions"
+        ],
+        "summary": "Revoke an in-memory secret",
+        "parameters": [
+          {
+            "name": "userId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "secretId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Secret revoked."
+          },
+          "404": {
+            "description": "Session or secret not found."
+          }
+        }
+      }
+    },
+    "/sessions/{userId}/checkpoints": {
+      "get": {
+        "tags": [
+          "Sessions"
+        ],
+        "summary": "List storage-state checkpoints",
+        "parameters": [
+          {
+            "name": "userId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Checkpoint list."
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Sessions"
+        ],
+        "summary": "Create a storage-state checkpoint",
+        "parameters": [
+          {
+            "name": "userId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "checkpointId": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Checkpoint metadata and limitations."
+          },
+          "404": {
+            "description": "Session not found."
+          },
+          "409": {
+            "description": "Named checkpoint already exists."
+          }
+        }
+      }
+    },
+    "/sessions/{userId}/checkpoints/{checkpointId}": {
+      "delete": {
+        "tags": [
+          "Sessions"
+        ],
+        "summary": "Delete a storage-state checkpoint",
+        "parameters": [
+          {
+            "name": "userId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "checkpointId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Checkpoint deleted."
+          },
+          "404": {
+            "description": "Checkpoint not found."
+          }
+        }
+      }
+    },
+    "/sessions/{userId}/forks": {
+      "post": {
+        "tags": [
+          "Sessions"
+        ],
+        "summary": "Fork a session from a storage-state checkpoint",
+        "parameters": [
+          {
+            "name": "userId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "checkpointId",
+                  "newUserId"
+                ],
+                "properties": {
+                  "checkpointId": {
+                    "type": "string"
+                  },
+                  "newUserId": {
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "sessionKey": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "New isolated session and tab."
+          },
+          "404": {
+            "description": "Checkpoint not found."
+          },
+          "409": {
+            "description": "Target session already exists."
           }
         }
       }

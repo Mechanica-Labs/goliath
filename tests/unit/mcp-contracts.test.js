@@ -51,3 +51,37 @@ test('MCP tab creation uses a stable user and session partition', () => {
     sessionKey: 'certificate-course',
   });
 });
+
+test('MCP semantic requests preserve snapshot and session boundaries', () => {
+  const context = { userId: 'agent/one', sessionKey: 'task-1' };
+  expect(buildRequest('goliath_plan_action', {
+    tabId: 'tab/a',
+    snapshotId: 'snapshot-1',
+    nodeId: 'node-1',
+    kind: 'click',
+    allowedOrigins: ['https://example.com'],
+  }, context)).toMatchObject({
+    method: 'POST',
+    path: '/tabs/tab%2Fa/actions/plan',
+    body: {
+      userId: 'agent/one',
+      snapshotId: 'snapshot-1',
+      action: { nodeId: 'node-1', kind: 'click' },
+      policy: { allowedOrigins: ['https://example.com'] },
+    },
+  });
+  expect(buildRequest('goliath_checkpoint', { checkpointId: 'before-submit' }, context)).toEqual({
+    method: 'POST',
+    path: '/sessions/agent%2Fone/checkpoints',
+    responseKind: 'json',
+    body: { checkpointId: 'before-submit' },
+  });
+  expect(buildRequest('goliath_fork', {
+    checkpointId: 'before-submit',
+    newUserId: 'branch-user',
+  }, context)).toMatchObject({
+    method: 'POST',
+    path: '/sessions/agent%2Fone/forks',
+    body: { checkpointId: 'before-submit', newUserId: 'branch-user' },
+  });
+});

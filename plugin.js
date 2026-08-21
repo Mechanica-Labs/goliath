@@ -181,6 +181,154 @@ export default function register(api) {
         },
     }));
     api.registerTool((ctx) => ({
+        name: "goliath_observe",
+        description: "Capture versioned semantic page state with durable node IDs, diffs, readiness confidence, capabilities, and provenance.",
+        parameters: {
+            type: "object",
+            properties: {
+                tabId: { type: "string", description: "Tab identifier" },
+                since: { type: "string", description: "Prior semantic snapshot ID for diffing" },
+                goalSelector: { type: "string", description: "Optional CSS selector whose presence contributes to readiness" },
+            },
+            required: ["tabId"],
+        },
+        async execute(_id, params) {
+            const { tabId, ...rest } = params;
+            const userId = ctx.agentId || fallbackUserId;
+            return toToolResult(await fetchApi(baseUrl, `/tabs/${tabId}/observe`, {
+                method: "POST",
+                body: JSON.stringify({ ...rest, userId }),
+            }));
+        },
+    }));
+    api.registerTool((ctx) => ({
+        name: "goliath_plan_action",
+        description: "Create a fail-closed semantic action contract with identity checks, predicted effects, and a policy decision.",
+        parameters: {
+            type: "object",
+            properties: {
+                tabId: { type: "string" },
+                snapshotId: { type: "string" },
+                nodeId: { type: "string" },
+                kind: { type: "string", enum: ["click", "type", "type_secret", "press"] },
+                text: { type: "string" },
+                secretId: { type: "string", description: "Opaque ID of a secret already registered outside the model context" },
+                key: { type: "string" },
+                allowedOrigins: { type: "array", items: { type: "string" } },
+            },
+            required: ["tabId", "snapshotId", "nodeId", "kind"],
+        },
+        async execute(_id, params) {
+            const { tabId, snapshotId, nodeId, kind, text, secretId, key, allowedOrigins } = params;
+            const userId = ctx.agentId || fallbackUserId;
+            return toToolResult(await fetchApi(baseUrl, `/tabs/${tabId}/actions/plan`, {
+                method: "POST",
+                body: JSON.stringify({ userId, snapshotId, action: { nodeId, kind, text, secretId, key }, policy: { allowedOrigins } }),
+            }));
+        },
+    }));
+    api.registerTool((ctx) => ({
+        name: "goliath_execute_action",
+        description: "Execute a previously planned action contract and verify caller-supplied postconditions.",
+        parameters: {
+            type: "object",
+            properties: {
+                tabId: { type: "string" },
+                contractId: { type: "string" },
+                confirm: { type: "boolean", description: "Explicitly confirm a policy-gated sensitive action" },
+                postconditions: { type: "array", items: { type: "object" } },
+            },
+            required: ["tabId", "contractId"],
+        },
+        async execute(_id, params) {
+            const { tabId, ...rest } = params;
+            const userId = ctx.agentId || fallbackUserId;
+            return toToolResult(await fetchApi(baseUrl, `/tabs/${tabId}/actions/execute`, {
+                method: "POST",
+                body: JSON.stringify({ ...rest, userId }),
+            }));
+        },
+    }));
+    api.registerTool((ctx) => ({
+        name: "goliath_extract",
+        description: "Extract typed data from a semantic snapshot with confidence and per-field provenance evidence.",
+        parameters: {
+            type: "object",
+            properties: {
+                tabId: { type: "string" },
+                snapshotId: { type: "string" },
+                schema: { type: "object" },
+            },
+            required: ["tabId", "schema"],
+        },
+        async execute(_id, params) {
+            const { tabId, ...rest } = params;
+            const userId = ctx.agentId || fallbackUserId;
+            return toToolResult(await fetchApi(baseUrl, `/tabs/${tabId}/extract`, {
+                method: "POST",
+                body: JSON.stringify({ ...rest, userId, mode: "semantic" }),
+            }));
+        },
+    }));
+    api.registerTool((ctx) => ({
+        name: "goliath_handoff",
+        description: "Pause a tab for scoped human takeover, resume it, or cancel the handoff. The VNC plugin supplies the interactive UI.",
+        parameters: {
+            type: "object",
+            properties: {
+                tabId: { type: "string" },
+                action: { type: "string", enum: ["request", "resume", "cancel"] },
+                reason: { type: "string" },
+            },
+            required: ["tabId", "action"],
+        },
+        async execute(_id, params) {
+            const { tabId, ...rest } = params;
+            const userId = ctx.agentId || fallbackUserId;
+            return toToolResult(await fetchApi(baseUrl, `/tabs/${tabId}/handoff`, {
+                method: "POST",
+                body: JSON.stringify({ ...rest, userId }),
+            }));
+        },
+    }));
+    api.registerTool((ctx) => ({
+        name: "goliath_checkpoint",
+        description: "Checkpoint cookies, local storage, and IndexedDB for later session forking. Live DOM and JavaScript heap are not captured.",
+        parameters: {
+            type: "object",
+            properties: { checkpointId: { type: "string" } },
+            required: [],
+        },
+        async execute(_id, params) {
+            const userId = ctx.agentId || fallbackUserId;
+            return toToolResult(await fetchApi(baseUrl, `/sessions/${encodeURIComponent(userId)}/checkpoints`, {
+                method: "POST",
+                body: JSON.stringify(params),
+            }));
+        },
+    }));
+    api.registerTool((ctx) => ({
+        name: "goliath_fork",
+        description: "Create an isolated browser session from a storage checkpoint and optionally navigate it to a URL.",
+        parameters: {
+            type: "object",
+            properties: {
+                checkpointId: { type: "string" },
+                newUserId: { type: "string" },
+                url: { type: "string" },
+                sessionKey: { type: "string" },
+            },
+            required: ["checkpointId", "newUserId"],
+        },
+        async execute(_id, params) {
+            const userId = ctx.agentId || fallbackUserId;
+            return toToolResult(await fetchApi(baseUrl, `/sessions/${encodeURIComponent(userId)}/forks`, {
+                method: "POST",
+                body: JSON.stringify(params),
+            }));
+        },
+    }));
+    api.registerTool((ctx) => ({
         name: "goliath_click",
         description: "Click an element in a Goliath tab by ref (e.g., e1) or CSS selector, optionally with humanized pointer motion.",
         parameters: {
