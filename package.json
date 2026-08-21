@@ -107,6 +107,34 @@
         "description": "Get accessibility snapshot with element refs"
       },
       {
+        "name": "goliath_observe",
+        "description": "Get versioned semantic state, diffs, readiness, and provenance"
+      },
+      {
+        "name": "goliath_plan_action",
+        "description": "Create and policy-check a semantic action contract"
+      },
+      {
+        "name": "goliath_execute_action",
+        "description": "Execute and verify a semantic action contract"
+      },
+      {
+        "name": "goliath_extract",
+        "description": "Extract typed data with confidence and provenance"
+      },
+      {
+        "name": "goliath_handoff",
+        "description": "Pause or resume a tab for human takeover"
+      },
+      {
+        "name": "goliath_checkpoint",
+        "description": "Create a session storage checkpoint"
+      },
+      {
+        "name": "goliath_fork",
+        "description": "Fork an isolated session from a checkpoint"
+      },
+      {
         "name": "goliath_click",
         "description": "Click an element by ref or CSS selector"
       },
@@ -189,6 +217,7 @@
     "@modelcontextprotocol/server": "^2.0.0",
     "camoufox-js": "^0.12.0",
     "express": "^4.18.2",
+    "express-rate-limit": "^8.6.2",
     "playwright-core": "^1.58.0",
     "prom-client": "^15.1.3",
     "swagger-jsdoc": "^6.2.8",

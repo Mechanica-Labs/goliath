@@ -53,8 +53,14 @@ try {
   const { TOOL_NAMES } = await import(pathToFileURL(join(packageRoot, 'mcp', 'tool-contracts.mjs')));
   const generic = harnessConfigs().json.mcpServers.goliath;
   if (!generic.args.includes('@mechanica-labs/goliath@0.1.0')) throw new Error('packed harness config has the wrong npm identity');
-  if (!TOOL_NAMES.includes('goliath_hands') || TOOL_NAMES.length !== 15) {
-    throw new Error(`packed public MCP contract has ${TOOL_NAMES.length} tools or is missing Hands`);
+  const declaredToolNames = manifest.openclaw.tools.map(tool => tool.name).sort();
+  const contractToolNames = [...TOOL_NAMES].sort();
+  if (
+    !TOOL_NAMES.includes('goliath_hands') ||
+    new Set(TOOL_NAMES).size !== TOOL_NAMES.length ||
+    JSON.stringify(contractToolNames) !== JSON.stringify(declaredToolNames)
+  ) {
+    throw new Error(`packed public MCP contract is inconsistent (${TOOL_NAMES.length} tools)`);
   }
 
   const ids = ['codex', 'claude-code', 'cursor', 'hermes', 'openclaw'];

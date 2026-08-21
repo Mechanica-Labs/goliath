@@ -179,6 +179,13 @@
   "tools": [
     "goliath_create_tab",
     "goliath_snapshot",
+    "goliath_observe",
+    "goliath_plan_action",
+    "goliath_execute_action",
+    "goliath_extract",
+    "goliath_handoff",
+    "goliath_checkpoint",
+    "goliath_fork",
     "goliath_click",
     "goliath_type",
     "goliath_navigate",
@@ -197,6 +204,13 @@
     "tools": [
       "goliath_create_tab",
       "goliath_snapshot",
+      "goliath_observe",
+      "goliath_plan_action",
+      "goliath_execute_action",
+      "goliath_extract",
+      "goliath_handoff",
+      "goliath_checkpoint",
+      "goliath_fork",
       "goliath_click",
       "goliath_type",
       "goliath_navigate",
@@ -276,6 +290,11 @@
           "path": "~/.goliath/traces/<hashed-userId>/",
           "purpose": "Optional Playwright session traces for debugging",
           "gatedBy": "trace: true flag on tab creation (opt-in per session, off by default)"
+        },
+        {
+          "path": "~/.goliath/checkpoints/checkpoint-<uuid>.json",
+          "purpose": "Storage-state checkpoints for explicit isolated session forks",
+          "gatedBy": "POST /sessions/:userId/checkpoints (explicit per checkpoint)"
         }
       ]
     },
@@ -298,7 +317,8 @@
     "accessControl": "GOLIATH_ACCESS_KEY provides global bearer auth for all routes (except /health). Recommended for any non-localhost deployment.",
     "crashReporting": "Disabled by default with no built-in endpoint. Requires explicit opt-in plus an operator-configured HTTPS relay. No page content, URLs, domains, cookies, tokens, IPs, or user data is sent.",
     "binaryDownload": "Install the Camoufox runtime powering Goliath with npx camoufox-js fetch unless GOLIATH_EXECUTABLE points to an external bundle. Downloads are verified by camoufox-js.",
-    "sessionPersistence": "User sessions are persisted to ~/.goliath/profiles/ so authenticated browsing survives restarts. UserIds are hashed for directory names. Disable via persistence plugin config.",
+    "sessionPersistence": "User sessions are persisted to ~/.goliath/profiles/ so authenticated browsing survives restarts. Explicit checkpoints are stored separately under ~/.goliath/checkpoints/ and contain browser storage state, not live DOM or JavaScript heap. UserIds are hashed for directory names. Disable persistence via plugin config.",
+    "semanticSafety": "Page content is labeled untrusted. Semantic action contracts are bound to one snapshot, fail closed on stale or uncertain identities, support origin policy, require confirmation for sensitive effects, and block high-severity prompt-injection signals by default.",
     "noEmbeddedSecrets": "Zero credentials, private keys, tokens, or telemetry endpoints ship in this package. Runtime secrets are supplied through environment variables."
   }
 }
