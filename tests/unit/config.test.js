@@ -71,3 +71,13 @@ test('crash-report settings are forwarded to the server subprocess', () => {
     process.env = before;
   }
 });
+
+test('screenshot directory can be overridden', () => {
+  const before = { ...process.env };
+  try {
+    process.env.GOLIATH_SCREENSHOTS_DIR = '/tmp/goliath-shots';
+    expect(loadConfig().screenshotsDir).toBe('/tmp/goliath-shots');
+  } finally {
+    process.env = before;
+  }
+});
