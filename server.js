@@ -510,13 +510,19 @@ async function withTabGroupMutationLocks(tabEntries, operation, index = 0) {
   return withTabMutationLock(tabId, tabState, () => withTabGroupMutationLocks(tabEntries, operation, index + 1));
 }
 
+const MAX_OPERATION_TIMEOUT_MS = 10 * 60_000;
+
 async function withTimeout(promise, ms, label) {
+  const timeoutMs = Number(ms);
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_OPERATION_TIMEOUT_MS) {
+    throw new Error(`${label} timeout must be between 1 and ${MAX_OPERATION_TIMEOUT_MS}ms`);
+  }
   let timer;
   try {
     return await Promise.race([
       promise,
       new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+        timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
       }),
     ]);
   } finally {
