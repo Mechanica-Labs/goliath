@@ -24,7 +24,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { execSync } from './exec.js';
+import { execFileSync } from './exec.js';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -156,7 +156,7 @@ function installFromGit(url, name) {
     if (fs.existsSync(tmpDir)) fs.rmSync(tmpDir, { recursive: true });
 
     console.log(`Cloning ${url}...`);
-    execSync(`git clone --depth 1 ${url} ${tmpDir}`, { stdio: 'pipe' });
+    execFileSync('git', ['clone', '--depth', '1', url, tmpDir], { stdio: 'pipe' });
 
     // Case 1: Root is a plugin (has index.js with register)
     if (isPluginDir(tmpDir)) {
@@ -195,7 +195,7 @@ function installPluginDeps(name) {
   const pkgJson = path.join(pluginDir, 'package.json');
   if (fs.existsSync(pkgJson)) {
     console.log(`Installing npm dependencies for ${name}...`);
-    execSync('npm install --omit=dev', { cwd: pluginDir, stdio: 'inherit' });
+    execFileSync('npm', ['install', '--omit=dev'], { cwd: pluginDir, stdio: 'inherit' });
   }
 
   // Check for apt.txt / post-install.sh (just warn -- can't run apt locally)
