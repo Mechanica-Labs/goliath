@@ -30,6 +30,15 @@ const HUMANIZED_INPUT_SCHEMA = {
   description: 'Use variable human-like timing and motion; optionally select a profile',
 };
 
+const POSTCONDITIONS_SCHEMA = {
+  type: 'array', minItems: 1, maxItems: 20,
+  items: { oneOf: [
+    { type: 'object', additionalProperties: false, properties: { kind: { type: 'string', enum: ['url_matches'] }, pattern: { type: 'string', minLength: 1, maxLength: 512 } }, required: ['kind', 'pattern'] },
+    { type: 'object', additionalProperties: false, minProperties: 2, properties: { kind: { type: 'string', enum: ['node_exists'] }, nodeId: { type: 'string', minLength: 1, maxLength: 256 }, name: { type: 'string', minLength: 1, maxLength: 256 }, role: { type: 'string', minLength: 1, maxLength: 256 } }, required: ['kind'] },
+    { type: 'object', additionalProperties: false, properties: { kind: { type: 'string', enum: ['text_contains'] }, text: { type: 'string', minLength: 1, maxLength: 512 } }, required: ['kind', 'text'] },
+  ] },
+};
+
 export const TOOL_DEFS = [
   {
     name: 'goliath_create_tab',
@@ -98,9 +107,9 @@ export const TOOL_DEFS = [
         tabId: { type: 'string' },
         contractId: { type: 'string' },
         confirm: { type: 'boolean' },
-        postconditions: { type: 'array', items: { type: 'object' } },
+        postconditions: POSTCONDITIONS_SCHEMA,
       },
-      required: ['tabId', 'contractId'],
+      required: ['tabId', 'contractId', 'postconditions'],
       additionalProperties: false,
     },
   },

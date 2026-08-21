@@ -113,7 +113,7 @@ The normal interaction loop is: create a tab, navigate, request a snapshot, act 
 
 ## Semantic state and safe actions
 
-`POST /tabs/:tabId/observe` adds a durable, versioned layer above temporary `eN` refs. It returns best-effort semantic node IDs, changes from the prior observation, readiness confidence and reasons, affordances, provenance, capability limits, and prompt-injection signals. Page content is always labeled untrusted.
+`POST /tabs/:tabId/observe` adds a durable, versioned layer above temporary `eN` refs. It returns best-effort semantic node IDs, changes from the prior observation, readiness confidence and reasons, affordances, provenance, capability limits, and prompt-injection signals. Refs and semantic identities retain their exact browsing-frame provenance. Observation work is bounded to 512,000 accessibility-snapshot characters and 1,000 nodes, and prior-state matching uses bounded indexes rather than an all-pairs scan. Page content is always labeled untrusted.
 
 ```bash
 # Observe. Save snapshotId and the desired node ID from this response.
@@ -131,13 +131,13 @@ curl -sS -X POST http://127.0.0.1:9377/tabs/TAB_ID/actions/execute \
   -d '{"userId":"agent1","contractId":"CONTRACT_ID","confirm":true,"postconditions":[{"kind":"url_matches","pattern":"/next$"}]}'
 ```
 
-Successful legacy mutations invalidate outstanding semantic contracts. URL postconditions use bounded literal matching with optional leading `^` and trailing `$` anchors; arbitrary regular expressions are not evaluated. Use `GET /tabs/:tabId/events?userId=agent1` for observation events and `GET /tabs/:tabId/workflow?userId=agent1` for successful semantic steps as a replayable role/name workflow.
+Successful legacy mutations invalidate outstanding semantic contracts. Execution requires 1–20 valid postconditions, verifies all of them (AND semantics), and rejects empty, malformed, or unsupported conditions. A `node_exists` condition with several selectors requires one node to satisfy every supplied selector. URL postconditions use bounded literal matching with optional leading `^` and trailing `$` anchors; arbitrary regular expressions are not evaluated. Use `GET /tabs/:tabId/events?userId=agent1` for observation events and `GET /tabs/:tabId/workflow?userId=agent1` for successful semantic steps as a replayable role/name workflow.
 
 Semantic extraction binds JSON Schema properties to `x-node-id` values and returns per-field evidence, confidence, and unresolved fields. `deterministic_then_model` currently reports unresolved fields with `modelUsage: null`; it never silently sends page content to a model.
 
 ### Secrets, checkpoints, forks, and human handoff
 
-Register credentials through the authenticated REST API or another trusted channel, not an agent prompt. Values are held in memory, never echoed, and `type_secret` contracts can use them only on exact allowed origins.
+Register credentials through the authenticated REST API or another trusted channel, not an agent prompt. Values are held in memory, never echoed, and `type_secret` contracts can use them only on the exact live HTTP(S) origin of the target frame. Frame navigation invalidates the contract, and opaque frame origins fail closed.
 
 ```bash
 curl -sS -X POST http://127.0.0.1:9377/sessions/agent1/checkpoints \
@@ -152,7 +152,7 @@ curl -sS -X POST http://127.0.0.1:9377/tabs/TAB_ID/handoff \
   -d '{"userId":"agent1","action":"request","reason":"complete MFA"}'
 ```
 
-Checkpoints contain cookies, local storage, and IndexedDB and are stored under the application-owned `~/.goliath/checkpoints/` directory. They do not clone live DOM, the JavaScript heap, open connections, or remote server state. Forks create isolated contexts from that state, with the explicit checkpoint taking precedence over any old persistence profile for the destination user. Human handoff pauses mutating tab routes and prevents both individual-tab and tab-group deletion until the handoff is resumed or cancelled.
+Checkpoints contain cookies, local storage, and IndexedDB and are stored under the application-owned `~/.goliath/checkpoints/` directory. They do not clone live DOM, the JavaScript heap, open connections, or remote server state. Malformed checkpoint files are skipped with structured warnings so one bad file cannot poison the store. Checkpoint writes use per-checkpoint filesystem locks, and forks atomically reserve `newUserId`; forks create isolated contexts from the supplied state, which takes precedence over any old persistence profile for the destination user. Human handoff serializes with mutations and pauses mutating tab routes, individual-tab and tab-group deletion, session deletion, and automatic timeout/pressure reaping until it is resumed or cancelled. Privileged whole-server shutdown remains an explicit forced-teardown boundary and emits handoff-termination events.
 
 Semantic safety is fail-closed at the browser boundary: contracts are tied to one snapshot, domain policies run before execution, page instructions remain untrusted, and registered values are redacted from accessibility and semantic snapshots. Screenshot and arbitrary-evaluation endpoints remain privileged and can observe rendered data, so do not expose them to untrusted callers.
 

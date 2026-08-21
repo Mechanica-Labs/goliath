@@ -1006,7 +1006,8 @@
                 "type": "object",
                 "required": [
                   "userId",
-                  "contractId"
+                  "contractId",
+                  "postconditions"
                 ],
                 "properties": {
                   "userId": {
@@ -1020,9 +1021,85 @@
                   },
                   "postconditions": {
                     "type": "array",
-                    "description": "URL conditions use bounded literal matching with optional ^ and $ anchors; regular expressions are not evaluated.",
+                    "minItems": 1,
+                    "maxItems": 20,
+                    "description": "Every condition is required to pass. URL patterns use bounded literal matching with optional ^ and $ anchors; regular expressions are not evaluated.",
                     "items": {
-                      "type": "object"
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "kind",
+                            "pattern"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "enum": [
+                                "url_matches"
+                              ]
+                            },
+                            "pattern": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 512
+                            }
+                          }
+                        },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "kind"
+                          ],
+                          "minProperties": 2,
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "enum": [
+                                "node_exists"
+                              ]
+                            },
+                            "nodeId": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 256
+                            },
+                            "name": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 256
+                            },
+                            "role": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 256
+                            }
+                          }
+                        },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "kind",
+                            "text"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "enum": [
+                                "text_contains"
+                              ]
+                            },
+                            "text": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 512
+                            }
+                          }
+                        }
+                      ]
                     }
                   }
                 }
@@ -1033,6 +1110,9 @@
         "responses": {
           "200": {
             "description": "Execution and verification result."
+          },
+          "400": {
+            "description": "Missing or invalid postconditions."
           },
           "409": {
             "description": "Contract stale",
@@ -3451,6 +3531,9 @@
                 }
               }
             }
+          },
+          "423": {
+            "description": "Session contains a tab paused for human handoff."
           }
         }
       }
@@ -3597,7 +3680,7 @@
           "Browser"
         ],
         "summary": "Stop browser",
-        "description": "Stops the browser and closes all sessions. Requires x-admin-key header.",
+        "description": "Privileged force-stop that terminates active human handoffs with an audited termination event, closes all sessions, and stops the browser. Requires x-admin-key header.",
         "security": [
           {
             "BearerAuth": []
@@ -3701,6 +3784,9 @@
                 }
               }
             }
+          },
+          "423": {
+            "description": "Tab paused for human handoff."
           }
         }
       }
@@ -3786,6 +3872,9 @@
                 }
               }
             }
+          },
+          "423": {
+            "description": "Tab paused for human handoff."
           }
         }
       }
@@ -3890,6 +3979,9 @@
                 }
               }
             }
+          },
+          "423": {
+            "description": "Tab paused for human handoff."
           }
         }
       }

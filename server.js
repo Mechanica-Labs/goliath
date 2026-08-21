@@ -1,4 +1,3 @@
-import { launchOptions } from 'camoufox-js';
 import { VirtualDisplay } from 'camoufox-js/dist/virtdisplay.js';
 import { firefox } from 'playwright-core';
 import express from 'express';
@@ -23,9 +22,11 @@ import { extractPageImages } from './lib/images.js';
 import { extractDeterministic, validateSchema as validateExtractSchema } from './lib/extract.js';
 import { extractSemantic, validateSemanticSchema } from './lib/extract.js';
 import { buildSemanticSnapshot, createReadinessTracker } from './lib/semantic.js';
-import { planAction, validateContract, verifyPostconditions } from './lib/action-contracts.js';
+import { planAction, validateContract, validatePostconditions, verifyPostconditions } from './lib/action-contracts.js';
 import { createCheckpoint, deleteCheckpoint, listCheckpoints, readCheckpoint } from './lib/checkpoints.js';
-import { findPausedHandoff, pausedHandoff } from './lib/handoff.js';
+import { findPausedHandoff, findPausedHandoffInSession, handoffPausedError, pausedHandoff } from './lib/handoff.js';
+import { resolveRefTarget, validateSecretTarget } from './lib/frame-targets.js';
+import { SessionReservationRegistry } from './lib/session-reservations.js';
 import { resolveUploadPaths } from './lib/upload-paths.js';
 import {
   ensureTracesDir, resolveTracePath, tracePathFor, makeTraceFilename,
@@ -53,9 +54,15 @@ import {
   endSessionActivity,
   removeSessionIfCurrent,
   sessionCanBeReaped,
+  sessionHasPausedHandoff,
 } from './lib/session-lifecycle.js';
 
 const CONFIG = loadConfig();
+const runtimeInterval = (...args) => {
+  const timer = globalThis.setInterval(...args);
+  if (CONFIG.nodeEnv === 'test') timer.unref();
+  return timer;
+};
 
 // --- Crash reporter (opt-in, anonymized GitHub issues) ---
 import { readFileSync } from 'fs';
@@ -77,7 +84,7 @@ function _browserPid() {
 function _resourceOpts() {
   return { sessionCount: sessions.size, tabCount: _countTabs(), browserPid: _browserPid() };
 }
-reporter.startWatchdog(30_000, () => {
+if (CONFIG.nodeEnv !== 'test') reporter.startWatchdog(30_000, () => {
   const summary = [];
   for (const [sid, session] of sessions) {
     const tabUrls = [];
@@ -226,6 +233,8 @@ function sendError(res, err, extraFields = {}) {
     body.code = 'stale_refs';
     body.ref = err.ref;
   }
+  if (err.code) body.code = err.code;
+  if (err.handoff) body.handoff = err.handoff;
   // Report unexpected 500s to Sentry (skip intentional admission-control 503s)
   if (status >= 500 && !err.statusCode) {
     sentryCaptureException(err, {
@@ -487,13 +496,32 @@ async function withTabLock(tabId, operation, timeoutMs = HANDLER_TIMEOUT_MS) {
   }
 }
 
-function withTimeout(promise, ms, label) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
-    )
-  ]);
+async function withTabMutationLock(tabId, tabState, operation, timeoutMs = HANDLER_TIMEOUT_MS) {
+  return withTabLock(tabId, async () => {
+    const handoff = pausedHandoff(tabState);
+    if (handoff) throw handoffPausedError(handoff);
+    return operation();
+  }, timeoutMs);
+}
+
+async function withTabGroupMutationLocks(tabEntries, operation, index = 0) {
+  if (index >= tabEntries.length) return operation();
+  const [tabId, tabState] = tabEntries[index];
+  return withTabMutationLock(tabId, tabState, () => withTabGroupMutationLocks(tabEntries, operation, index + 1));
+}
+
+async function withTimeout(promise, ms, label) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function requestTimeoutMs(baseMs = HANDLER_TIMEOUT_MS) {
@@ -986,6 +1014,7 @@ async function launchBrowserInstance() {
     });
 
     try {
+      const { launchOptions } = await import('camoufox-js');
       const options = await launchOptions({
         executable_path: externalGoliath?.executablePath,
         headless: useVirtualDisplay ? false : true,
@@ -1083,6 +1112,7 @@ function normalizeUserId(userId) {
 }
 
 const sessionCreations = new Map();
+const sessionReservations = new SessionReservationRegistry();
 
 function clearSessionLocks(session) {
   if (!session?.tabGroups) return;
@@ -1106,6 +1136,16 @@ async function closeSession(userId, session, {
   if (!session) return;
 
   const key = normalizeUserId(userId);
+
+  for (const [groupId, group] of session.tabGroups?.entries?.() || []) {
+    for (const [tabId, tabState] of group) {
+      const handoff = pausedHandoff(tabState);
+      if (!handoff) continue;
+      tabState.handoff = { ...handoff, status: 'terminated', completedAt: new Date().toISOString(), terminationReason: reason };
+      log('warn', 'paused handoff terminated by unavoidable session teardown', { userId: key, groupId, tabId, reason });
+      pluginEvents.emit('tab:handoff:terminated', { userId: key, groupId, tabId, handoff: tabState.handoff, reason });
+    }
+  }
 
   // Drain locks BEFORE closing context — queued operations get clean "Tab destroyed"
   // (410) instead of messy "Target page closed" (500) errors.
@@ -1147,9 +1187,33 @@ async function closeAllSessions(reason, { clearDownloads = true, clearLocks = tr
   }
 }
 
-async function getSession(userId, { trace = false, storageState = null } = {}) {
+async function closeReapableSession(userId, session, reason) {
   const key = normalizeUserId(userId);
+  const tabEntries = Array.from(session.tabGroups?.values?.() || [])
+    .flatMap(group => Array.from(group.entries()))
+    .sort(([a], [b]) => a.localeCompare(b));
+  let closed = false;
+  try {
+    await withTabGroupMutationLocks(tabEntries, async () => {
+      if (sessions.get(key) !== session || !sessionCanBeReaped(session)) return;
+      session._closing = true;
+      await closeSession(key, session, { reason, clearDownloads: true, clearLocks: false });
+      closed = true;
+    });
+  } catch (err) {
+    if (err?.statusCode !== 423) log('warn', 'atomic session reaper skipped', { userId: key, reason, error: err.message });
+  }
+  if (closed) clearSessionLocks(session);
+  return closed;
+}
+
+async function getSession(userId, { trace = false, storageState = null, reservation = null } = {}) {
+  const key = normalizeUserId(userId);
+  sessionReservations.assertAvailable(key, reservation);
   let session = sessions.get(key);
+  if (reservation && session) {
+    throw Object.assign(new Error('target session already exists'), { statusCode: 409, code: 'session_exists' });
+  }
   
   // Check if existing session's context is still alive
   if (session) {
@@ -1170,6 +1234,10 @@ async function getSession(userId, { trace = false, storageState = null } = {}) {
   
   if (!session) {
     session = await coalesceInflight(sessionCreations, key, async () => {
+      sessionReservations.assertAvailable(key, reservation);
+      if (sessions.has(key)) {
+        throw Object.assign(new Error('target session already exists'), { statusCode: 409, code: 'session_exists' });
+      }
       if (sessions.size >= MAX_SESSIONS) {
         throw Object.assign(
           new Error('Maximum concurrent sessions reached'),
@@ -1307,7 +1375,7 @@ function handleRouteError(err, req, res, extraFields = {}) {
     pluginEvents.emit('tab:error', { userId, tabId, error: err });
   }
   if (userId && isDeadContextError(err)) {
-    destroySession(userId);
+    destroySession(userId, { reason: 'dead_context', force: true });
   }
   // Proxy errors mean the session is dead -- rotate at context level.
   // Destroy the user's session so the next request gets a fresh context with a new proxy.
@@ -1404,7 +1472,12 @@ function handleRouteError(err, req, res, extraFields = {}) {
   sendError(res, err, extraFields);
 }
 
-function destroyTab(session, tabId, reason, userId) {
+function destroyTab(session, tabId, reason, userId, { force = false } = {}) {
+  const found = findTab(session, tabId);
+  if (found && pausedHandoff(found.tabState) && !force) {
+    log('warn', 'tab teardown skipped during human handoff', { tabId, userId: userId || null, reason });
+    return false;
+  }
   const lock = tabLocks.get(tabId);
   if (lock) {
     lock.drain();
@@ -1440,6 +1513,7 @@ async function recycleOldestTab(session, reqId, userId) {
   let oldestTabId = null;
   for (const [gKey, group] of session.tabGroups) {
     for (const [tid, ts] of group) {
+      if (pausedHandoff(ts)) continue;
       if (!oldestTab || ts.toolCalls < oldestTab.toolCalls) {
         oldestTab = ts;
         oldestGroup = group;
@@ -1463,13 +1537,19 @@ async function recycleOldestTab(session, reqId, userId) {
   return { recycledTabId: oldestTabId, recycledFromGroup: oldestGroupKey };
 }
 
-function destroySession(userId) {
+function destroySession(userId, { reason = 'destroy_session', force = false } = {}) {
   const key = normalizeUserId(userId);
   const session = sessions.get(key);
-  if (!session) return;
-  log('warn', 'destroying dead session', { userId: key });
+  if (!session) return false;
+  const paused = findPausedHandoffInSession(session);
+  if (paused && !force) {
+    log('warn', 'session teardown skipped during human handoff', { userId: key, tabId: paused.tabId, reason });
+    return false;
+  }
+  log('warn', 'destroying dead session', { userId: key, reason, force });
   sessions.delete(key);
-  closeSession(key, session, { reason: 'destroy_session', clearDownloads: true, clearLocks: true }).catch(() => {});
+  closeSession(key, session, { reason, clearDownloads: true, clearLocks: true }).catch(() => {});
+  return true;
 }
 
 function findTab(session, tabId) {
@@ -1625,6 +1705,7 @@ async function goliathPressureCleanup(options = {}) {
     sessionTabCounts.set(userId, count);
   }
   const preserved = {
+    handoff_paused: 0,
     locked: 0,
     session_minimum: 0,
     first_observation: 0,
@@ -1636,6 +1717,10 @@ async function goliathPressureCleanup(options = {}) {
   for (const [userId, session] of sessions) {
     for (const [listItemId, group] of session.tabGroups) {
       for (const [tabId, tabState] of group) {
+        if (pausedHandoff(tabState)) {
+          preserved.handoff_paused += 1;
+          continue;
+        }
         const lockState = pressureLockState(tabId);
         if (lockState.active || lockState.queued > 0) {
           preserved.locked += 1;
@@ -1694,32 +1779,32 @@ async function goliathPressureCleanup(options = {}) {
 
   if (!dryRun) {
     for (const item of selected) {
-      if (!item.group.has(item.tabId)) continue;
-      if ((sessionTabCounts.get(item.userId) || 0) <= minTabsPerSession) continue;
-      const lockState = pressureLockState(item.tabId);
-      if (lockState.active || lockState.queued > 0) continue;
-      if (item.tabState.navigateAbort) item.tabState.navigateAbort.abort();
-      await clearTabDownloads(item.tabState).catch(() => {});
-      disposeTabState(item.tabState, 'pressure_cleanup');
-      await safePageClose(item.tabState.page);
-      item.group.delete(item.tabId);
-      sessionTabCounts.set(item.userId, Math.max(0, (sessionTabCounts.get(item.userId) || 0) - 1));
-      const lock = tabLocks.get(item.tabId);
-      if (lock) {
-        lock.drain();
-        tabLocks.delete(item.tabId);
+      try {
+        await withTabMutationLock(item.tabId, item.tabState, async () => {
+          if (!item.group.has(item.tabId)) return;
+          if ((sessionTabCounts.get(item.userId) || 0) <= minTabsPerSession) return;
+          if (item.tabState.navigateAbort) item.tabState.navigateAbort.abort();
+          await clearTabDownloads(item.tabState).catch(() => {});
+          disposeTabState(item.tabState, 'pressure_cleanup');
+          await safePageClose(item.tabState.page);
+          item.group.delete(item.tabId);
+          sessionTabCounts.set(item.userId, Math.max(0, (sessionTabCounts.get(item.userId) || 0) - 1));
+          tabsReapedTotal.inc();
+          pluginEvents.emit('tab:reaped', { userId: item.userId, tabId: item.tabId, listItemId: item.listItemId, reason: 'pressure_cleanup', idleMs: item.idleMs });
+          log('info', 'tab reaped (pressure cleanup)', { userId: item.userId, tabId: item.tabId, listItemId: item.listItemId, idleMs: item.idleMs, toolCalls: item.toolCalls });
+          closed.push({ session: pressureHash(item.userId), tab: pressureHash(item.tabId), group: pressureHash(item.listItemId), idleMs: item.idleMs, toolCalls: item.toolCalls });
+        });
+      } catch (err) {
+        if (err?.statusCode !== 423) throw err;
+        preserved.handoff_paused += 1;
       }
-      tabsReapedTotal.inc();
-      pluginEvents.emit('tab:reaped', { userId: item.userId, tabId: item.tabId, listItemId: item.listItemId, reason: 'pressure_cleanup', idleMs: item.idleMs });
-      log('info', 'tab reaped (pressure cleanup)', { userId: item.userId, tabId: item.tabId, listItemId: item.listItemId, idleMs: item.idleMs, toolCalls: item.toolCalls });
-      closed.push({ session: pressureHash(item.userId), tab: pressureHash(item.tabId), group: pressureHash(item.listItemId), idleMs: item.idleMs, toolCalls: item.toolCalls });
     }
 
     for (const [userId, session] of Array.from(sessions.entries())) {
       for (const [listItemId, group] of Array.from(session.tabGroups.entries())) {
         if (group.size === 0) session.tabGroups.delete(listItemId);
       }
-      if (closeEmptySessions && session.tabGroups.size === 0) {
+      if (closeEmptySessions && session.tabGroups.size === 0 && sessionCanBeReaped(session)) {
         session._closing = true;
         await closeSession(userId, session, { reason: 'pressure_cleanup_empty_session', clearDownloads: true, clearLocks: true });
         sessionsExpiredTotal.inc();
@@ -2083,6 +2168,17 @@ async function extractGoogleSerp(page) {
 }
 
 const REFRESH_READY_TIMEOUT_MS = 2500;
+const frameKeys = new WeakMap();
+
+function frameKeyFor(page, frame) {
+  if (frame === page.mainFrame()) return 'main';
+  let key = frameKeys.get(frame);
+  if (!key) {
+    key = `frame_${crypto.randomUUID()}`;
+    frameKeys.set(frame, key);
+  }
+  return key;
+}
 
 async function buildRefs(page) {
   const refs = new Map();
@@ -2140,133 +2236,17 @@ async function _buildRefsInner(page, refs, start) {
     return refs;
   }
   
-  let ariaYaml;
-  try {
-    ariaYaml = await page.locator('body').ariaSnapshot({ timeout: Math.min(remaining - 1000, 5000) });
-  } catch (err) {
-    log('warn', 'ariaSnapshot failed, retrying');
-    const retryBudget = BUILDREFS_TIMEOUT_MS - (Date.now() - start);
-    if (retryBudget < 2000) return refs;
-    try {
-      ariaYaml = await page.locator('body').ariaSnapshot({ timeout: Math.min(retryBudget - 500, 5000) });
-    } catch (retryErr) {
-      log('warn', 'ariaSnapshot retry failed, returning empty refs', { error: retryErr.message });
-      return refs;
-    }
-  }
-  
-  if (!ariaYaml) {
-    log('warn', 'buildRefs: no aria snapshot');
-    return refs;
-  }
-  
-  const lines = ariaYaml.split('\n');
-  let refCounter = 1;
-  
-  // Track occurrences of each role+name combo for nth disambiguation
-  const seenCounts = new Map(); // "role:name" -> count
-  
-  for (const line of lines) {
-    if (refCounter > MAX_SNAPSHOT_NODES) break;
-    
-    const match = line.match(/^\s*-\s+(\w+)(?:\s+"([^"]*)")?/);
-    if (match) {
-      const [, role, name] = match;
-      const normalizedRole = role.toLowerCase();
-      
-      if (normalizedRole === 'combobox') continue;
-      
-      if (name && SKIP_PATTERNS.some(p => p.test(name))) continue;
-      
-      if (INTERACTIVE_ROLES.includes(normalizedRole)) {
-        const normalizedName = name || '';
-        const key = `${normalizedRole}:${normalizedName}`;
-        
-        // Get current count and increment
-        const nth = seenCounts.get(key) || 0;
-        seenCounts.set(key, nth + 1);
-        
-        const refId = `e${refCounter++}`;
-        refs.set(refId, { role: normalizedRole, name: normalizedName, nth });
-      }
-    }
-  }
-  
-  // --- IFRAME SUPPORT ---
-  // Process child frames to capture elements inside iframes (e.g., Stripe payment fields)
-  const iframeRemaining = BUILDREFS_TIMEOUT_MS - (Date.now() - start);
-  if (iframeRemaining > 2000 && refCounter <= MAX_SNAPSHOT_NODES) {
-    const childFrames = page.frames().filter(f => f !== page.mainFrame());
-    let iframesProcessed = 0;
-    
-    for (const frame of childFrames) {
-      if (iframesProcessed >= MAX_IFRAMES_TO_PROCESS) break;
-      if (refCounter > MAX_SNAPSHOT_NODES) break;
-      
-      const frameUrl = frame.url();
-      const frameName = frame.name();
-      
-      // Skip tracking/analytics iframes
-      if (IFRAME_SKIP_PATTERNS.some(p => p.test(frameUrl) || p.test(frameName))) continue;
-      // Skip about:blank and empty frames
-      if (!frameUrl || frameUrl === 'about:blank' || frameUrl === 'about:srcdoc') continue;
-      
-      try {
-        const frameYaml = await frame.locator('body').ariaSnapshot({ timeout: IFRAME_SNAPSHOT_TIMEOUT_MS });
-        if (!frameYaml || frameYaml.trim().length < 10) continue;
-        
-        // Check if frame has any interactive elements
-        const hasInteractive = INTERACTIVE_ROLES.some(role => {
-          const regex = new RegExp(`^\\s*-\\s+${role}`, 'im');
-          return regex.test(frameYaml);
-        });
-        if (!hasInteractive) continue;
-        
-        iframesProcessed++;
-        // Use a separate seenCounts for each iframe (nth is per-frame for locator resolution)
-        const frameSeenCounts = new Map();
-        
-        const frameLines = frameYaml.split('\n');
-        for (const line of frameLines) {
-          if (refCounter > MAX_SNAPSHOT_NODES) break;
-          
-          const match = line.match(/^\s*-\s+(\w+)(?:\s+"([^"]*)")?/);
-          if (match) {
-            const [, role, name] = match;
-            const normalizedRole = role.toLowerCase();
-            if (normalizedRole === 'combobox') continue;
-            if (name && SKIP_PATTERNS.some(p => p.test(name))) continue;
-            
-            if (INTERACTIVE_ROLES.includes(normalizedRole)) {
-              const normalizedName = name || '';
-              const key = `${normalizedRole}:${normalizedName}`;
-              const nth = frameSeenCounts.get(key) || 0;
-              frameSeenCounts.set(key, nth + 1);
-              
-              const refId = `e${refCounter++}`;
-              refs.set(refId, { role: normalizedRole, name: normalizedName, nth, frameName: frameName || null, frameUrl });
-            }
-          }
-        }
-        
-        log('debug', 'buildRefs: processed iframe', { frameName, frameUrl: frameUrl.slice(0, 80), refs: refCounter - 1 });
-      } catch (err) {
-        // Frame might have navigated away or be inaccessible — skip silently
-        log('debug', 'buildRefs: iframe snapshot failed', { frameName, error: err.message?.slice(0, 80) });
-      }
-    }
-    
-    if (iframesProcessed > 0) {
-      log('info', 'buildRefs: processed iframes', { count: iframesProcessed, totalRefs: refCounter - 1 });
-    }
-  }
-  
-  return refs;
+  const contexts = await captureAriaContexts(page, { mainTimeoutMs: Math.min(remaining - 1000, 5000) });
+  return buildRefsFromContexts(contexts, refs);
 }
 
-async function getAriaSnapshot(page) {
+function hasInteractiveAria(yaml) {
+  return INTERACTIVE_ROLES.some(role => new RegExp(`^\\s*-\\s+${role}`, 'im').test(yaml));
+}
+
+async function captureAriaContexts(page, { mainTimeoutMs = 5000 } = {}) {
   if (!page || page.isClosed()) {
-    return null;
+    return [];
   }
   await waitForPageReady(page, {
     timeout: REFRESH_READY_TIMEOUT_MS,
@@ -2274,69 +2254,91 @@ async function getAriaSnapshot(page) {
     waitForHydration: false,
     settleMs: 100,
   });
+  const mainFrame = page.mainFrame();
   let mainYaml;
   try {
-    mainYaml = await page.locator('body').ariaSnapshot({ timeout: 5000 });
+    mainYaml = await mainFrame.locator('body').ariaSnapshot({ timeout: mainTimeoutMs });
   } catch (err) {
     log('warn', 'getAriaSnapshot failed', { error: err.message });
-    return null;
+    return [];
   }
-  
-  if (!mainYaml) return null;
-  
-  // --- IFRAME SUPPORT ---
-  // Append accessible iframe content to the snapshot YAML
-  const childFrames = page.frames().filter(f => f !== page.mainFrame());
-  const iframeYamls = [];
+  if (!mainYaml) return [];
+
+  const contexts = [{
+    frame: mainFrame,
+    frameKey: 'main',
+    frameName: null,
+    frameUrl: mainFrame.url(),
+    label: null,
+    yaml: mainYaml,
+  }];
+  const childFrames = page.frames().filter(frame => frame !== mainFrame);
   let iframesProcessed = 0;
-  
   for (const frame of childFrames) {
     if (iframesProcessed >= MAX_IFRAMES_TO_PROCESS) break;
-    
     const frameUrl = frame.url();
     const frameName = frame.name();
-    
-    // Skip tracking/analytics iframes
     if (IFRAME_SKIP_PATTERNS.some(p => p.test(frameUrl) || p.test(frameName))) continue;
-    if (!frameUrl || frameUrl === 'about:blank' || frameUrl === 'about:srcdoc') continue;
-    
     try {
       const frameYaml = await frame.locator('body').ariaSnapshot({ timeout: IFRAME_SNAPSHOT_TIMEOUT_MS });
       if (!frameYaml || frameYaml.trim().length < 10) continue;
-      
-      // Only include frames with interactive elements
-      const hasInteractive = INTERACTIVE_ROLES.some(role => {
-        const regex = new RegExp(`^\\s*-\\s+${role}`, 'im');
-        return regex.test(frameYaml);
-      });
-      if (!hasInteractive) continue;
-      
+      if (!hasInteractiveAria(frameYaml)) continue;
       iframesProcessed++;
-      // Derive a human-readable label from frame name or URL
       let label = frameName || '';
       if (!label) {
         try { label = new URL(frameUrl).hostname; } catch { label = 'iframe'; }
       }
-      // Clean up Shopify-style frame names for readability
       label = label.replace(/card-fields-/, '').replace(/-[a-z0-9]{10,}$/, '');
-      
-      iframeYamls.push(`- iframe "${label}":\n${frameYaml.split('\n').map(l => '  ' + l).join('\n')}`);
-    } catch {
-      // Frame inaccessible — skip
+      contexts.push({
+        frame,
+        frameKey: frameKeyFor(page, frame),
+        frameName: frameName || null,
+        frameUrl,
+        label,
+        yaml: frameYaml,
+      });
+    } catch (error) {
+      log('debug', 'iframe snapshot failed', { frameName, error: error.message?.slice(0, 80) });
     }
   }
-  
-  if (iframeYamls.length > 0) {
-    return mainYaml + '\n' + iframeYamls.join('\n');
-  }
-  return mainYaml;
+  return contexts;
 }
 
-function annotateAriaSnapshot(ariaYaml, refs) {
+function buildRefsFromContexts(contexts, refs = new Map()) {
+  let refCounter = refs.size + 1;
+  for (const context of contexts) {
+    const seenCounts = new Map();
+    for (const line of context.yaml.split('\n')) {
+      if (refCounter > MAX_SNAPSHOT_NODES) return refs;
+      const match = line.match(/^\s*-\s+(\w+)(?:\s+"([^"]*)")?/);
+      if (!match) continue;
+      const [, role, name] = match;
+      const normalizedRole = role.toLowerCase();
+      if (normalizedRole === 'combobox' || !INTERACTIVE_ROLES.includes(normalizedRole)) continue;
+      if (name && SKIP_PATTERNS.some(pattern => pattern.test(name))) continue;
+      const normalizedName = name || '';
+      const key = `${normalizedRole}:${normalizedName}`;
+      const nth = seenCounts.get(key) || 0;
+      seenCounts.set(key, nth + 1);
+      refs.set(`e${refCounter++}`, {
+        role: normalizedRole,
+        name: normalizedName,
+        nth,
+        frame: context.frame,
+        frameKey: context.frameKey,
+        frameName: context.frameName,
+        frameUrl: context.frameUrl,
+      });
+    }
+  }
+  return refs;
+}
+
+function annotateAriaSnapshot(ariaYaml, refs, frameKey = 'main') {
   if (!ariaYaml || !(refs instanceof Map) || refs.size === 0) return ariaYaml || '';
   const refsByKey = new Map();
   for (const [refId, info] of refs) {
-    refsByKey.set(`${info.role}:${info.name}:${info.nth}`, refId);
+    refsByKey.set(`${info.frameKey || 'main'}:${info.role}:${info.name}:${info.nth}`, refId);
   }
   const counts = new Map();
   return ariaYaml.split('\n').map(line => {
@@ -2350,9 +2352,23 @@ function annotateAriaSnapshot(ariaYaml, refs) {
     const countKey = `${normalizedRole}:${normalizedName}`;
     const nth = counts.get(countKey) || 0;
     counts.set(countKey, nth + 1);
-    const refId = refsByKey.get(`${normalizedRole}:${normalizedName}:${nth}`);
+    const refId = refsByKey.get(`${frameKey}:${normalizedRole}:${normalizedName}:${nth}`);
     return refId ? `${prefix}${role}${nameMatch || ''} [${refId}]${suffix}` : line;
   }).join('\n');
+}
+
+function formatAriaContexts(contexts, refs = null) {
+  return contexts.map(context => {
+    const yaml = refs ? annotateAriaSnapshot(context.yaml, refs, context.frameKey) : context.yaml;
+    if (context.frameKey === 'main') return yaml;
+    const marker = `[frame-key=${context.frameKey}] [frame-url=${encodeURIComponent(context.frameUrl || '')}]`;
+    return `- iframe "${context.label || 'iframe'}" ${marker}:\n${yaml.split('\n').map(line => `  ${line}`).join('\n')}`;
+  }).join('\n');
+}
+
+async function getAriaSnapshot(page) {
+  const contexts = await captureAriaContexts(page);
+  return contexts.length ? formatAriaContexts(contexts) : null;
 }
 
 function redactSecretValues(text, session) {
@@ -2371,8 +2387,9 @@ async function captureSemanticObservation(tabState, { since = null, goalSelector
     tabState.refs = google.refs;
     annotatedYaml = google.snapshot;
   } else {
-    tabState.refs = await refreshTabRefs(tabState, { reason: 'semantic_observe' });
-    annotatedYaml = annotateAriaSnapshot(await getAriaSnapshot(tabState.page), tabState.refs);
+    const contexts = await captureAriaContexts(tabState.page);
+    tabState.refs = buildRefsFromContexts(contexts);
+    annotatedYaml = formatAriaContexts(contexts, tabState.refs);
   }
   annotatedYaml = redactSecretValues(annotatedYaml, session);
   tabState.lastSnapshot = annotatedYaml;
@@ -2399,37 +2416,12 @@ async function captureSemanticObservation(tabState, { since = null, goalSelector
 }
 
 function refToLocator(page, ref, refs) {
-  const info = refs.get(ref);
-  if (!info) return null;
-  
-  const { role, name, nth, frameName, frameUrl } = info;
-  
-  // If ref belongs to an iframe, resolve via frame locator
-  if (frameName || frameUrl) {
-    let frame = null;
-    if (frameName) {
-      frame = page.frame({ name: frameName });
-    }
-    if (!frame && frameUrl) {
-      // Try matching by URL (partial match for long URLs)
-      frame = page.frames().find(f => f.url() === frameUrl || f.url().startsWith(frameUrl.slice(0, 80)));
-    }
-    if (frame) {
-      let locator = frame.getByRole(role, name ? { name } : undefined);
-      locator = locator.nth(nth);
-      return locator;
-    }
-    // Frame not found (navigated away?) — fall through to page-level resolution
-    log('warn', 'refToLocator: frame not found for iframe ref', { ref, frameName, frameUrl: frameUrl?.slice(0, 60) });
+  const target = resolveRefTarget(page, ref, refs);
+  if (!target.ok) {
+    log('warn', 'refToLocator: target unavailable', { ref, reason: target.reason });
+    return null;
   }
-  
-  let locator = page.getByRole(role, name ? { name } : undefined);
-  
-  // Always use .nth() to disambiguate duplicate role+name combinations
-  // This avoids "strict mode violation" when multiple elements match
-  locator = locator.nth(nth);
-  
-  return locator;
+  return target.locator;
 }
 
 async function refreshTabRefs(tabState, options = {}) {
@@ -2929,7 +2921,7 @@ app.post('/tabs/:tabId/navigate', async (req, res) => {
       const urlErr = validateUrl(targetUrl);
       if (urlErr) throw new Error(urlErr);
       
-      return await withTabLock(tabId, async () => {
+      return await withTabMutationLock(tabId, tabState, async () => {
         const currentSessionKey = found?.listItemId || resolvedSessionKey;
         const isGoogleSearch = isGoogleSearchUrl(targetUrl);
 
@@ -3314,7 +3306,7 @@ app.get('/tabs/:tabId/events', async (req, res) => {
   send.close = () => res.end();
   found.tabState.semanticListeners.add(send);
   send({ type: 'connected', snapshotId: found.tabState.lastSemanticSnapshot?.snapshotId || null });
-  const heartbeat = setInterval(() => res.write(': keepalive\n\n'), 15_000);
+  const heartbeat = runtimeInterval(() => res.write(': keepalive\n\n'), 15_000);
   req.on('close', () => {
     clearInterval(heartbeat);
     found.tabState.semanticListeners.delete(send);
@@ -3370,24 +3362,36 @@ app.get('/tabs/:tabId/handoff', async (req, res) => {
 });
 
 app.post('/tabs/:tabId/handoff', async (req, res) => {
-  const { userId, action, reason = 'human assistance requested' } = req.body;
-  const session = userId && sessions.get(normalizeUserId(userId));
-  const found = session && findTab(session, req.params.tabId);
-  if (!found) return tabNotFoundResponse(res, req.params.tabId);
-  if (!['request', 'resume', 'cancel'].includes(action)) return res.status(400).json({ error: 'action must be request, resume, or cancel' });
-  const previous = found.tabState.handoff;
-  found.tabState.handoff = action === 'request' ? {
-    handoffId: `handoff_${crypto.randomUUID()}`,
-    status: 'paused',
-    reason,
-    requestedAt: new Date().toISOString(),
-  } : {
-    ...(previous || { handoffId: `handoff_${crypto.randomUUID()}`, requestedAt: new Date().toISOString() }),
-    status: action === 'resume' ? 'resumed' : 'cancelled',
-    completedAt: new Date().toISOString(),
-  };
-  pluginEvents.emit('tab:handoff', { userId, tabId: req.params.tabId, ...found.tabState.handoff });
-  res.json({ handoff: found.tabState.handoff, vncPluginRequired: true });
+  try {
+    const { userId, action, reason = 'human assistance requested' } = req.body;
+    const session = userId && sessions.get(normalizeUserId(userId));
+    const found = session && findTab(session, req.params.tabId);
+    if (!found) return tabNotFoundResponse(res, req.params.tabId);
+    if (!['request', 'resume', 'cancel'].includes(action)) return res.status(400).json({ error: 'action must be request, resume, or cancel' });
+    const handoff = await withTabLock(req.params.tabId, async () => {
+      const current = sessions.get(normalizeUserId(userId));
+      const lockedFound = current && findTab(current, req.params.tabId);
+      if (!lockedFound || lockedFound.tabState !== found.tabState) {
+        throw Object.assign(new Error('Tab not found'), { statusCode: 404, code: 'tab_not_found' });
+      }
+      const previous = lockedFound.tabState.handoff;
+      lockedFound.tabState.handoff = action === 'request' ? {
+        handoffId: `handoff_${crypto.randomUUID()}`,
+        status: 'paused',
+        reason,
+        requestedAt: new Date().toISOString(),
+      } : {
+        ...(previous || { handoffId: `handoff_${crypto.randomUUID()}`, requestedAt: new Date().toISOString() }),
+        status: action === 'resume' ? 'resumed' : 'cancelled',
+        completedAt: new Date().toISOString(),
+      };
+      return lockedFound.tabState.handoff;
+    });
+    pluginEvents.emit('tab:handoff', { userId, tabId: req.params.tabId, ...handoff });
+    res.json({ handoff, vncPluginRequired: true });
+  } catch (err) {
+    handleRouteError(err, req, res);
+  }
 });
 
 /**
@@ -3459,24 +3463,51 @@ app.post('/tabs/:tabId/actions/plan', express.json({ limit: '256kb' }), async (r
  *         application/json:
  *           schema:
  *             type: object
- *             required: [userId, contractId]
+ *             required: [userId, contractId, postconditions]
  *             properties:
  *               userId: { type: string }
  *               contractId: { type: string }
  *               confirm: { type: boolean }
  *               postconditions:
  *                 type: array
- *                 description: URL conditions use bounded literal matching with optional ^ and $ anchors; regular expressions are not evaluated.
- *                 items: { type: object }
+ *                 minItems: 1
+ *                 maxItems: 20
+ *                 description: Every condition is required to pass. URL patterns use bounded literal matching with optional ^ and $ anchors; regular expressions are not evaluated.
+ *                 items:
+ *                   oneOf:
+ *                     - type: object
+ *                       additionalProperties: false
+ *                       required: [kind, pattern]
+ *                       properties:
+ *                         kind: { type: string, enum: [url_matches] }
+ *                         pattern: { type: string, minLength: 1, maxLength: 512 }
+ *                     - type: object
+ *                       additionalProperties: false
+ *                       required: [kind]
+ *                       minProperties: 2
+ *                       properties:
+ *                         kind: { type: string, enum: [node_exists] }
+ *                         nodeId: { type: string, minLength: 1, maxLength: 256 }
+ *                         name: { type: string, minLength: 1, maxLength: 256 }
+ *                         role: { type: string, minLength: 1, maxLength: 256 }
+ *                     - type: object
+ *                       additionalProperties: false
+ *                       required: [kind, text]
+ *                       properties:
+ *                         kind: { type: string, enum: [text_contains] }
+ *                         text: { type: string, minLength: 1, maxLength: 512 }
  *     responses:
  *       200: { description: Execution and verification result. }
+ *       400: { description: Missing or invalid postconditions. }
  *       409: { description: Contract stale, blocked, or awaiting confirmation. }
  *       423: { description: Tab paused for human handoff. }
  */
 app.post('/tabs/:tabId/actions/execute', express.json({ limit: '256kb' }), async (req, res) => {
   try {
-    const { userId, contractId, confirm = false, postconditions = [] } = req.body;
+    const { userId, contractId, confirm = false, postconditions } = req.body;
     if (!userId || !contractId) return res.status(400).json({ error: 'userId and contractId are required' });
+    const postconditionValidation = validatePostconditions(postconditions);
+    if (!postconditionValidation.ok) return res.status(400).json({ error: postconditionValidation.error, code: 'invalid_postconditions' });
     const session = userId && sessions.get(normalizeUserId(userId));
     const found = session && findTab(session, req.params.tabId);
     if (!found) return tabNotFoundResponse(res, req.params.tabId);
@@ -3485,11 +3516,13 @@ app.post('/tabs/:tabId/actions/execute', express.json({ limit: '256kb' }), async
     const contract = tabState.actionContracts.get(contractId);
     const validation = validateContract(contract, { snapshot: tabState.lastSemanticSnapshot, confirm });
     if (!validation.ok) return res.status(409).json(validation);
-    contract.status = 'executing';
 
     let result;
     try {
-      result = await withUserLimit(userId, () => withTabLock(req.params.tabId, async () => {
+      result = await withUserLimit(userId, () => withTabMutationLock(req.params.tabId, tabState, async () => {
+        const lockedValidation = validateContract(contract, { snapshot: tabState.lastSemanticSnapshot, confirm });
+        if (!lockedValidation.ok) return lockedValidation;
+        contract.status = 'executing';
         const sourceSnapshot = tabState.semanticSnapshots.get(contract.snapshotId);
         const freshSnapshot = await captureSemanticObservation(tabState, { since: contract.snapshotId, session });
         if (!sourceSnapshot || freshSnapshot.stateHash !== sourceSnapshot.stateHash) {
@@ -3499,21 +3532,24 @@ app.post('/tabs/:tabId/actions/execute', express.json({ limit: '256kb' }), async
         if (!freshNode || freshNode.identityConfidence < 0.75) {
           return { ok: false, status: 'rejected_stale', reasons: ['target_missing_or_uncertain'], snapshot: freshSnapshot };
         }
+        const freshFrame = freshNode.provenance?.frame;
+        if (freshFrame?.key !== contract.target.frameKey || freshFrame?.url !== contract.target.frameUrl) {
+          return { ok: false, status: 'rejected_stale', reasons: ['target_frame_changed'], snapshot: freshSnapshot };
+        }
         const ref = freshNode.ref;
-        const locator = ref && refToLocator(tabState.page, ref, tabState.refs);
-        if (!locator) return { ok: false, status: 'rejected_stale', reasons: ['target_not_resolvable'] };
-        if (contract.action.kind === 'click') await locator.click({ timeout: 10_000 });
-        else if (contract.action.kind === 'type') await locator.fill(String(contract.action.text ?? ''));
+        const target = ref ? resolveRefTarget(tabState.page, ref, tabState.refs) : { ok: false, reason: 'ref_not_found' };
+        if (!target.ok) return { ok: false, status: 'rejected_stale', reasons: [target.reason || 'target_not_resolvable'] };
+        if (contract.action.kind === 'click') await target.locator.click({ timeout: 10_000 });
+        else if (contract.action.kind === 'type') await target.locator.fill(String(contract.action.text ?? ''));
         else if (contract.action.kind === 'type_secret') {
           const secret = session.secrets.get(contract.action.secretId);
-          let currentOrigin = null;
-          try { currentOrigin = new URL(tabState.page.url()).origin; } catch {}
-          if (!secret || !secret.allowedOrigins.includes(currentOrigin)) {
-            return { ok: false, status: 'blocked', reasons: ['secret_missing_or_origin_not_allowed'] };
+          const targetValidation = validateSecretTarget(secret, target);
+          if (!targetValidation.ok) {
+            return { ok: false, status: 'blocked', reasons: [targetValidation.reason] };
           }
-          await locator.fill(secret.value);
+          await target.locator.fill(secret.value);
         }
-        else if (contract.action.kind === 'press') await locator.press(String(contract.action.key || 'Enter'));
+        else if (contract.action.kind === 'press') await target.locator.press(String(contract.action.key || 'Enter'));
         else return { ok: false, status: 'unsupported_action', reasons: ['unsupported_action'] };
         tabState.lastSnapshot = null;
         const nextSnapshot = await captureSemanticObservation(tabState, { session });
@@ -3531,7 +3567,7 @@ app.post('/tabs/:tabId/actions/execute', express.json({ limit: '256kb' }), async
         if (tabState.workflowSteps.length > 100) tabState.workflowSteps.shift();
         return {
           ok: true,
-          status: postconditions.length === 0 ? 'executed_unverified' : (verification.verified ? 'executed_verified' : 'executed_but_unverified'),
+          status: verification.verified ? 'executed_verified' : 'executed_but_unverified',
           snapshot: nextSnapshot,
           verification,
         };
@@ -3734,7 +3770,7 @@ app.post('/tabs/:tabId/click', async (req, res) => {
     }
     
     let inputResult = { mode: 'direct' };
-    const result = await withUserLimit(userId, () => withTabLock(tabId, async () => {
+    const result = await withUserLimit(userId, () => withTabMutationLock(tabId, tabState, async () => {
       const clickStart = Date.now();
       const remainingBudget = () => Math.max(0, HANDLER_TIMEOUT_MS - 2000 - (Date.now() - clickStart));
       // Full mouse event sequence for stubborn JS click handlers (mirrors Swift WebView.swift)
@@ -3989,7 +4025,7 @@ app.post('/tabs/:tabId/upload', authMiddleware(), async (req, res) => {
     tabState.consecutiveTimeouts = 0;
     tabState.consecutiveFailures = 0;
 
-    const result = await withUserLimit(userId, () => withTabLock(tabId, async () => {
+    const result = await withUserLimit(userId, () => withTabMutationLock(tabId, tabState, async () => {
       const page = tabState.page;
       const directInput = page.locator('input[type="file"]').first();
       let via = null;
@@ -4172,7 +4208,7 @@ app.post('/tabs/:tabId/type', async (req, res) => {
     const shouldSubmit = submit || pressEnter;
     
     let inputResult = { mode: mode === 'keyboard' ? 'keyboard-fixed-delay' : 'fill' };
-    await withTabLock(tabId, async () => {
+    await withTabMutationLock(tabId, tabState, async () => {
       // Resolve and focus the target if ref/selector provided
       let locator = null;
       if (ref) {
@@ -4303,7 +4339,7 @@ app.post('/tabs/:tabId/press', async (req, res) => {
     const { tabState } = found;
     tabState.toolCalls++; tabState.consecutiveTimeouts = 0; tabState.consecutiveFailures = 0;
     
-    await withTabLock(tabId, async () => {
+    await withTabMutationLock(tabId, tabState, async () => {
       await tabState.page.keyboard.press(key);
       recordBehaviorEvent(tabState.behavior, 'key', { category: 'press' });
     });
@@ -4388,7 +4424,7 @@ app.post('/tabs/:tabId/scroll', async (req, res) => {
     tabState.toolCalls++; tabState.consecutiveTimeouts = 0; tabState.consecutiveFailures = 0;
     
     let inputResult = { mode: 'direct', pulses: 1 };
-    await withTabLock(req.params.tabId, async () => {
+    await withTabMutationLock(req.params.tabId, tabState, async () => {
       if (inputConfig.enabled) {
         inputResult = await humanizedScroll(tabState.page, direction, amount, {
           profile: inputConfig.profile,
@@ -4725,7 +4761,7 @@ app.post('/tabs/:tabId/hands', async (req, res) => {
     // would let one hand hold the tab lock past TAB_LOCK_TIMEOUT_MS). Instead,
     // enforce a self-terminating deadline inside the loop so a long step list
     // stops cleanly within the normal route budget.
-    const result = await withUserLimit(userId, () => withTabLock(tabId, async () => {
+    const result = await withUserLimit(userId, () => withTabMutationLock(tabId, tabState, async () => {
       // Computed inside the lock so time spent waiting in the user concurrency
       // queue does not eat the budget. Kept below HANDLER_TIMEOUT_MS so the
       // standard withTimeout() wins cleanly for any single hung step.
@@ -4881,8 +4917,10 @@ app.post('/tabs/:tabId/viewport', async (req, res) => {
     const { tabState } = found;
     tabState.toolCalls++; tabState.consecutiveTimeouts = 0; tabState.consecutiveFailures = 0;
 
-    await tabState.page.setViewportSize({ width: Math.round(width), height: Math.round(height) });
-    await tabState.page.waitForTimeout(150);
+    await withTabMutationLock(req.params.tabId, tabState, async () => {
+      await tabState.page.setViewportSize({ width: Math.round(width), height: Math.round(height) });
+      await tabState.page.waitForTimeout(150);
+    });
 
     pluginEvents.emit('tab:viewport', { userId, tabId: req.params.tabId, width, height });
     res.json({ ok: true, width: Math.round(width), height: Math.round(height) });
@@ -4949,7 +4987,7 @@ app.post('/tabs/:tabId/back', async (req, res) => {
     const { tabState } = found;
     tabState.toolCalls++; tabState.consecutiveTimeouts = 0; tabState.consecutiveFailures = 0;
     
-    const result = await withTabLock(tabId, async () => {
+    const result = await withTabMutationLock(tabId, tabState, async () => {
       try {
         await tabState.page.goBack({ timeout: 20000 });
       } catch (navErr) {
@@ -5029,7 +5067,7 @@ app.post('/tabs/:tabId/forward', async (req, res) => {
     const { tabState } = found;
     tabState.toolCalls++; tabState.consecutiveTimeouts = 0; tabState.consecutiveFailures = 0;
     
-    const result = await withTabLock(tabId, async () => {
+    const result = await withTabMutationLock(tabId, tabState, async () => {
       await tabState.page.goForward({ timeout: 10000 });
       tabState.refs = await buildRefs(tabState.page);
       return { ok: true, url: tabState.page.url() };
@@ -5099,7 +5137,7 @@ app.post('/tabs/:tabId/refresh', async (req, res) => {
     const { tabState } = found;
     tabState.toolCalls++; tabState.consecutiveTimeouts = 0; tabState.consecutiveFailures = 0;
     
-    const result = await withTabLock(tabId, async () => {
+    const result = await withTabMutationLock(tabId, tabState, async () => {
       await tabState.page.reload({ timeout: 30000 });
       tabState.refs = await buildRefs(tabState.page);
       return { ok: true, url: tabState.page.url() };
@@ -5548,14 +5586,13 @@ app.post('/tabs/:tabId/evaluate', authMiddleware(), express.json({ limit: '1mb' 
     tabState.toolCalls++; tabState.consecutiveTimeouts = 0; tabState.consecutiveFailures = 0;
 
     pluginEvents.emit('tab:evaluate', { userId, tabId: req.params.tabId, expression });
-    const result = await tabState.page.evaluate(expression);
+    const result = await withTabMutationLock(req.params.tabId, tabState, () => tabState.page.evaluate(expression));
     pluginEvents.emit('tab:evaluated', { userId, tabId: req.params.tabId, result });
     log('info', 'evaluate', { reqId: req.reqId, tabId: req.params.tabId, userId, resultType: typeof result });
     res.json({ ok: true, result });
   } catch (err) {
-    failuresTotal.labels(classifyError(err), 'evaluate').inc();
     log('error', 'evaluate failed', { reqId: req.reqId, error: err.message });
-    res.status(500).json({ error: safeError(err) });
+    handleRouteError(err, req, res);
   }
 });
 
@@ -5770,15 +5807,16 @@ app.delete('/tabs/:tabId', async (req, res) => {
     const handoff = found && pausedHandoff(found.tabState);
     if (handoff) return res.status(423).json({ error: 'tab paused for human handoff', handoff });
     if (found) {
-      if (found.tabState.navigateAbort) found.tabState.navigateAbort.abort();
-      await clearTabDownloads(found.tabState);
-      disposeTabState(found.tabState, 'closed');
-      await safePageClose(found.tabState.page);
-      found.group.delete(req.params.tabId);
-      { const _l = tabLocks.get(req.params.tabId); if (_l) _l.drain(); tabLocks.delete(req.params.tabId); refreshTabLockQueueDepth(); }
-      if (found.group.size === 0) {
-        session.tabGroups.delete(found.listItemId);
-      }
+      await withTabMutationLock(req.params.tabId, found.tabState, async () => {
+        const current = findTab(session, req.params.tabId);
+        if (!current || current.tabState !== found.tabState) return;
+        if (found.tabState.navigateAbort) found.tabState.navigateAbort.abort();
+        await clearTabDownloads(found.tabState);
+        disposeTabState(found.tabState, 'closed');
+        await safePageClose(found.tabState.page);
+        found.group.delete(req.params.tabId);
+        if (found.group.size === 0) session.tabGroups.delete(found.listItemId);
+      });
       refreshActiveTabsGauge();
       log('info', 'tab closed', { reqId: req.reqId, tabId: req.params.tabId, userId });
     }
@@ -5847,17 +5885,17 @@ app.delete('/tabs/group/:listItemId', async (req, res) => {
       });
     }
     if (group) {
-      for (const [tabId, tabState] of group) {
-        await clearTabDownloads(tabState);
-        disposeTabState(tabState, 'group_closed');
-        await safePageClose(tabState.page);
-        const lock = tabLocks.get(tabId);
-        if (lock) {
-          lock.drain();
-          tabLocks.delete(tabId);
+      const tabEntries = Array.from(group.entries()).sort(([a], [b]) => a.localeCompare(b));
+      await withTabGroupMutationLocks(tabEntries, async () => {
+        const currentGroup = session.tabGroups.get(req.params.listItemId);
+        if (currentGroup !== group) return;
+        for (const [, tabState] of tabEntries) {
+          await clearTabDownloads(tabState);
+          disposeTabState(tabState, 'group_closed');
+          await safePageClose(tabState.page);
         }
-      }
-      session.tabGroups.delete(req.params.listItemId);
+        session.tabGroups.delete(req.params.listItemId);
+      });
       refreshTabLockQueueDepth();
       refreshActiveTabsGauge();
       log('info', 'tab group closed', { reqId: req.reqId, listItemId: req.params.listItemId, userId });
@@ -6194,7 +6232,9 @@ app.delete('/sessions/:userId/secrets/:secretId', authMiddleware(), async (req, 
  */
 app.get('/sessions/:userId/checkpoints', authMiddleware(), async (req, res) => {
   try {
-    res.json({ checkpoints: await listCheckpoints(CONFIG.checkpointsDir, normalizeUserId(req.params.userId)) });
+    res.json({ checkpoints: await listCheckpoints(CONFIG.checkpointsDir, normalizeUserId(req.params.userId), {
+      onWarning: detail => log('warn', 'checkpoint file skipped', detail),
+    }) });
   } catch (err) { handleRouteError(err, req, res); }
 });
 
@@ -6210,6 +6250,7 @@ app.post('/sessions/:userId/checkpoints', authMiddleware(), async (req, res) => 
       context: session.context,
       checkpointId: req.body?.checkpointId,
       metadata: { urls },
+      onWarning: detail => log('warn', 'checkpoint file skipped', detail),
     });
     pluginEvents.emit('session:checkpoint', { userId, checkpointId: checkpoint.checkpointId });
     res.json({
@@ -6246,7 +6287,9 @@ app.post('/sessions/:userId/checkpoints', authMiddleware(), async (req, res) => 
  */
 app.delete('/sessions/:userId/checkpoints/:checkpointId', authMiddleware(), async (req, res) => {
   try {
-    const deleted = await deleteCheckpoint(CONFIG.checkpointsDir, normalizeUserId(req.params.userId), req.params.checkpointId);
+    const deleted = await deleteCheckpoint(CONFIG.checkpointsDir, normalizeUserId(req.params.userId), req.params.checkpointId, {
+      onWarning: detail => log('warn', 'checkpoint file skipped', detail),
+    });
     if (!deleted) return res.status(404).json({ error: 'checkpoint not found' });
     res.json({ ok: true });
   } catch (err) { handleRouteError(err, req, res); }
@@ -6283,21 +6326,30 @@ app.delete('/sessions/:userId/checkpoints/:checkpointId', authMiddleware(), asyn
 app.post('/sessions/:userId/forks', authMiddleware(), async (req, res) => {
   let forkSession = null;
   let targetUserId = null;
+  let reservation = null;
+  let createdByFork = false;
   try {
     const sourceUserId = normalizeUserId(req.params.userId);
     const { checkpointId, newUserId, sessionKey = 'fork', url } = req.body;
     if (!checkpointId || !newUserId) return res.status(400).json({ error: 'checkpointId and newUserId are required' });
     targetUserId = normalizeUserId(newUserId);
-    if (sessions.has(targetUserId)) return res.status(409).json({ error: 'target session already exists' });
-    const checkpoint = await readCheckpoint(CONFIG.checkpointsDir, sourceUserId, checkpointId);
+    reservation = sessionReservations.reserve(targetUserId, {
+      sessionExists: sessions.has(targetUserId),
+      creationPending: sessionCreations.has(targetUserId),
+    });
+    if (!reservation) return res.status(409).json({ error: 'target session already exists or is reserved' });
+    const checkpoint = await readCheckpoint(CONFIG.checkpointsDir, sourceUserId, checkpointId, {
+      onWarning: detail => log('warn', 'checkpoint file skipped', detail),
+    });
     if (!checkpoint) return res.status(404).json({ error: 'checkpoint not found' });
     const targetUrl = url || checkpoint.metadata?.urls?.[0] || 'about:blank';
     if (targetUrl !== 'about:blank') {
       const urlError = validateUrl(targetUrl);
       if (urlError) return res.status(400).json({ error: urlError });
     }
-    const session = await getSession(targetUserId, { storageState: checkpoint.state });
+    const session = await getSession(targetUserId, { storageState: checkpoint.state, reservation });
     forkSession = session;
+    createdByFork = true;
     const page = await session.context.newPage();
     if (targetUrl !== 'about:blank') await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: NAVIGATE_TIMEOUT_MS });
     const tabId = fly.makeTabId();
@@ -6316,10 +6368,12 @@ app.post('/sessions/:userId/forks', authMiddleware(), async (req, res) => {
       limitations: checkpoint.limitations,
     });
   } catch (err) {
-    if (forkSession && targetUserId) {
+    if (createdByFork && forkSession && targetUserId && sessions.get(targetUserId) === forkSession) {
       await closeSession(targetUserId, forkSession, { reason: 'fork_failed', clearDownloads: true, clearLocks: true }).catch(() => {});
     }
     handleRouteError(err, req, res);
+  } finally {
+    if (targetUserId && reservation) sessionReservations.release(targetUserId, reservation);
   }
 });
 
@@ -6355,13 +6409,29 @@ app.post('/sessions/:userId/forks', authMiddleware(), async (req, res) => {
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/Error'
+ *       423:
+ *         description: Session contains a tab paused for human handoff.
  */
 app.delete('/sessions/:userId', authMiddleware(), async (req, res) => {
   try {
     const userId = normalizeUserId(req.params.userId);
     const session = sessions.get(userId);
     if (session) {
-      await closeSession(userId, session, { reason: 'api_delete_session', clearDownloads: true, clearLocks: true });
+      const paused = findPausedHandoffInSession(session);
+      if (paused) {
+        return res.status(423).json({
+          error: 'session contains a tab paused for human handoff',
+          tabId: paused.tabId,
+          handoff: paused.handoff,
+        });
+      }
+      const tabEntries = Array.from(session.tabGroups.values())
+        .flatMap(group => Array.from(group.entries()))
+        .sort(([a], [b]) => a.localeCompare(b));
+      await withTabGroupMutationLocks(tabEntries, async () => {
+        if (sessions.get(userId) !== session) return;
+        await closeSession(userId, session, { reason: 'api_delete_session', clearDownloads: true, clearLocks: false });
+      });
       log('info', 'session closed', { userId });
     }
     if (sessions.size === 0) scheduleBrowserIdleShutdown();
@@ -6373,16 +6443,16 @@ app.delete('/sessions/:userId', authMiddleware(), async (req, res) => {
 });
 
 // Cleanup stale sessions
-setInterval(() => {
+runtimeInterval(async () => {
   const now = Date.now();
   for (const [userId, session] of Array.from(sessions.entries())) {
     if (sessionCanBeReaped(session) && now - session.lastAccess > SESSION_TIMEOUT_MS) {
-      session._closing = true;
       const idleMs = now - session.lastAccess;
-      sessionsExpiredTotal.inc();
-      pluginEvents.emit('session:expired', { userId, idleMs });
-      closeSession(userId, session, { reason: 'session_timeout', clearDownloads: true, clearLocks: true }).catch(() => {});
-      log('info', 'session expired', { userId });
+      if (await closeReapableSession(userId, session, 'session_timeout')) {
+        sessionsExpiredTotal.inc();
+        pluginEvents.emit('session:expired', { userId, idleMs });
+        log('info', 'session expired', { userId });
+      }
     }
   }
   // When all sessions gone, start idle timer to kill browser
@@ -6396,7 +6466,7 @@ setInterval(() => {
 // Prevents Goliath OOM by proactively freeing BrowserContexts.
 if (FLY_MACHINE_ID) {
   const MEMORY_HIGH_WATERMARK = 0.80;
-  setInterval(() => {
+  runtimeInterval(async () => {
     let totalMem = os.totalmem();
     let freeMem = os.freemem();
     let usedRatio = 1 - (freeMem / totalMem);
@@ -6425,12 +6495,12 @@ if (FLY_MACHINE_ID) {
         idleMs,
         sessions: sessions.size,
       });
-      session._closing = true;
-      sessionsExpiredTotal.inc();
-      closeSession(oldestKey, session, {
-        reason: 'memory_pressure', clearDownloads: true, clearLocks: true,
-      }).catch(() => {});
-      evicted++;
+      if (await closeReapableSession(oldestKey, session, 'memory_pressure')) {
+        sessionsExpiredTotal.inc();
+        evicted++;
+      } else {
+        break;
+      }
       // Re-check after marking session for closure
       freeMem = os.freemem();
       usedRatio = 1 - (freeMem / totalMem);
@@ -6439,7 +6509,7 @@ if (FLY_MACHINE_ID) {
 }
 
 // Per-tab inactivity reaper — close tabs idle for TAB_INACTIVITY_MS
-setInterval(() => {
+runtimeInterval(async () => {
   const now = Date.now();
   for (const [userId, session] of sessions) {
     if (!sessionCanBeReaped(session)) continue;
@@ -6455,14 +6525,20 @@ setInterval(() => {
         if (tabState.toolCalls === tabState._lastReaperToolCalls) {
           const idleMs = now - tabState._lastReaperCheck;
           if (idleMs >= TAB_INACTIVITY_MS) {
-            tabsReapedTotal.inc();
-            log('info', 'tab reaped (inactive)', { userId, tabId, listItemId, idleMs, toolCalls: tabState.toolCalls });
-            disposeTabState(tabState, 'inactive');
-            safePageClose(tabState.page);
-            group.delete(tabId);
-            { const _l = tabLocks.get(tabId); if (_l) _l.drain(); tabLocks.delete(tabId); }
-            refreshTabLockQueueDepth();
-            refreshActiveTabsGauge();
+            try {
+              await withTabMutationLock(tabId, tabState, async () => {
+                if (group.get(tabId) !== tabState || !sessionCanBeReaped(session)) return;
+                if (tabState.toolCalls !== tabState._lastReaperToolCalls) return;
+                tabsReapedTotal.inc();
+                log('info', 'tab reaped (inactive)', { userId, tabId, listItemId, idleMs, toolCalls: tabState.toolCalls });
+                disposeTabState(tabState, 'inactive');
+                await safePageClose(tabState.page);
+                group.delete(tabId);
+                refreshActiveTabsGauge();
+              });
+            } catch (err) {
+              if (err?.statusCode !== 423) log('warn', 'tab inactivity reaper skipped', { userId, tabId, error: err.message });
+            }
           }
         } else {
           tabState._lastReaperCheck = now;
@@ -6475,10 +6551,10 @@ setInterval(() => {
     }
     // Clean up sessions with zero tabs remaining -- free browser context memory
     if (session.tabGroups.size === 0 && sessionCanBeReaped(session)) {
-      session._closing = true;
-      log('info', 'session empty after tab reaper, closing', { userId });
-      closeSession(userId, session, { reason: 'tab_reaper_empty_session', clearDownloads: true, clearLocks: true }).catch(() => {});
-      sessionsExpiredTotal.inc();
+      if (await closeReapableSession(userId, session, 'tab_reaper_empty_session')) {
+        log('info', 'session empty after tab reaper, closing', { userId });
+        sessionsExpiredTotal.inc();
+      }
     }
   }
   if (sessions.size === 0) scheduleBrowserIdleShutdown();
@@ -6487,7 +6563,7 @@ setInterval(() => {
 // Orphan page reaper -- force-closes Playwright pages that survived a safePageClose
 // timeout or were otherwise dropped from tabGroups tracking. Without this, leaked
 // pages starve Firefox of DOM threads and eventually block new tab creation.
-setInterval(() => {
+runtimeInterval(() => {
   let reaped = 0;
   for (const session of sessions.values()) {
     if (session._closing) continue;
@@ -6516,7 +6592,7 @@ setInterval(() => {
 // process immediately if either Node native memory or the Goliath process tree
 // is large. This prevents idle Firefox children from holding most of the VM RAM
 // while Node reports zero sessions/tabs.
-setInterval(() => {
+runtimeInterval(() => {
   if (sessions.size > 0 || !browser) return;
   const mem = process.memoryUsage();
   const nativeMemMb = Math.round((mem.rss - mem.heapUsed) / 1048576);
@@ -6825,7 +6901,7 @@ app.post('/start', async (req, res) => {
  *   post:
  *     tags: [Browser]
  *     summary: Stop browser
- *     description: Stops the browser and closes all sessions. Requires x-admin-key header.
+ *     description: Privileged force-stop that terminates active human handoffs with an audited termination event, closes all sessions, and stops the browser. Requires x-admin-key header.
  *     security:
  *       - BearerAuth: []
  *     responses:
@@ -6905,6 +6981,8 @@ app.post('/stop', async (req, res) => {
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/Error'
+ *       423:
+ *         description: Tab paused for human handoff.
  */
 app.post('/navigate', async (req, res) => {
   try {
@@ -6928,7 +7006,7 @@ app.post('/navigate', async (req, res) => {
     const { tabState } = found;
     tabState.toolCalls++; tabState.consecutiveTimeouts = 0; tabState.consecutiveFailures = 0;
     
-    const result = await withTabLock(targetId, async () => {
+    const result = await withTabMutationLock(targetId, tabState, async () => {
       await withPageLoadDuration('navigate', () => tabState.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }));
       tabState.visitedUrls.add(url);
       tabState.lastSnapshot = null;
@@ -7002,6 +7080,8 @@ app.post('/navigate', async (req, res) => {
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/Error'
+ *       423:
+ *         description: Tab paused for human handoff.
  */
 app.get('/snapshot', async (req, res) => {
   try {
@@ -7180,6 +7260,8 @@ app.get('/snapshot', async (req, res) => {
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/Error'
+ *       423:
+ *         description: Tab paused for human handoff.
  */
 app.post('/act', async (req, res) => {
   try {
@@ -7204,7 +7286,7 @@ app.post('/act', async (req, res) => {
     }
     tabState.toolCalls++; tabState.consecutiveTimeouts = 0; tabState.consecutiveFailures = 0;
     
-    const result = await withTabLock(targetId, async () => {
+    const result = await withTabMutationLock(targetId, tabState, async () => {
       switch (kind) {
         case 'click': {
           const { ref, selector, doubleClick } = params;
@@ -7429,7 +7511,7 @@ app.post('/act', async (req, res) => {
 });
 
 // Periodic stats beacon (every 5 min)
-setInterval(() => {
+runtimeInterval(() => {
   const mem = process.memoryUsage();
   let totalTabs = 0;
   for (const [, session] of sessions) {
@@ -7448,7 +7530,7 @@ setInterval(() => {
 }, 5 * 60_000);
 
 // Active health probe -- detect hung browser even when isConnected() lies
-setInterval(async () => {
+runtimeInterval(async () => {
   if (!browser || healthState.isRecovering) return;
   const timeSinceSuccess = Date.now() - healthState.lastSuccessfulNav;
   // Skip probe if operations are in flight AND last success was recent.
@@ -7588,7 +7670,9 @@ function printStartupBanner() {
   }
 }
 
-const server = app.listen(PORT, CONFIG.bindHost, async () => {
+let server = null;
+if (CONFIG.nodeEnv !== 'test') {
+server = app.listen(PORT, CONFIG.bindHost, async () => {
   printStartupBanner();
   startMemoryReporter();
   refreshActiveTabsGauge();
@@ -7653,3 +7737,16 @@ server.on('error', (err) => {
   log('error', 'server error', { error: err.message });
   process.exit(1);
 });
+}
+
+const __testing = CONFIG.nodeEnv === 'test' ? {
+  config: CONFIG,
+  sessions,
+  sessionReservations,
+  tabLocks,
+  closeReapableSession,
+  withTabLock,
+  setBrowser(value) { browser = value; },
+} : null;
+
+export { app, server, __testing };

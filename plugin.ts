@@ -15,6 +15,15 @@ import { ensureBrowserInstalled } from "./lib/browser-install.js";
 import { launchServer } from "./lib/launcher.js";
 import { readCookieFile } from "./lib/cookies.js";
 
+const POSTCONDITIONS_SCHEMA = {
+  type: "array", minItems: 1, maxItems: 20,
+  items: { oneOf: [
+    { type: "object", additionalProperties: false, properties: { kind: { type: "string", enum: ["url_matches"] }, pattern: { type: "string", minLength: 1, maxLength: 512 } }, required: ["kind", "pattern"] },
+    { type: "object", additionalProperties: false, minProperties: 2, properties: { kind: { type: "string", enum: ["node_exists"] }, nodeId: { type: "string", minLength: 1, maxLength: 256 }, name: { type: "string", minLength: 1, maxLength: 256 }, role: { type: "string", minLength: 1, maxLength: 256 } }, required: ["kind"] },
+    { type: "object", additionalProperties: false, properties: { kind: { type: "string", enum: ["text_contains"] }, text: { type: "string", minLength: 1, maxLength: 512 } }, required: ["kind", "text"] },
+  ] },
+};
+
 // Get plugin directory - works in both ESM and CJS contexts
 const getPluginDir = (): string => {
   try {
@@ -341,9 +350,9 @@ export default function register(api: PluginApi) {
         tabId: { type: "string" },
         contractId: { type: "string" },
         confirm: { type: "boolean", description: "Explicitly confirm a policy-gated sensitive action" },
-        postconditions: { type: "array", items: { type: "object" } },
+        postconditions: POSTCONDITIONS_SCHEMA,
       },
-      required: ["tabId", "contractId"],
+      required: ["tabId", "contractId", "postconditions"],
     },
     async execute(_id, params) {
       const { tabId, ...rest } = params as { tabId: string } & Record<string, unknown>;
