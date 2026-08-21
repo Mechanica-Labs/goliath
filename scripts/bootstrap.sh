@@ -41,19 +41,32 @@ while [ $# -gt 0 ]; do
 done
 
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
-  BOLD=$'\033[1m'; DIM=$'\033[90m'; GREEN=$'\033[32m'; RED=$'\033[31m'
-  YELLOW=$'\033[33m'; CYAN=$'\033[36m'; RESET=$'\033[0m'
+  BOLD=$'\033[1m'
+  RESET=$'\033[0m'
+  if [ "${COLORTERM:-}" = "truecolor" ] || [ "${COLORTERM:-}" = "24bit" ]; then
+    SLIME=$'\033[38;2;184;255;0m'
+    PURPLE=$'\033[38;2;193;60;255m'
+    ORANGE=$'\033[38;2;255;106;0m'
+    DANGER=$'\033[38;2;255;49;88m'
+    MUTED=$'\033[38;2;167;139;184m'
+  else
+    SLIME=$'\033[92m'
+    PURPLE=$'\033[95m'
+    ORANGE=$'\033[33m'
+    DANGER=$'\033[31m'
+    MUTED=$'\033[90m'
+  fi
 else
-  BOLD=''; DIM=''; GREEN=''; RED=''; YELLOW=''; CYAN=''; RESET=''
+  BOLD=''; RESET=''; SLIME=''; PURPLE=''; ORANGE=''; DANGER=''; MUTED=''
 fi
 
 say()  { printf '  %s\n' "$*"; }
-ok()   { printf '  %s✔%s %s\n' "$GREEN" "$RESET" "$*"; }
-warn() { printf '  %s▲%s %s\n' "$YELLOW" "$RESET" "$*"; }
-die()  { printf '  %s✖%s %s\n' "$RED" "$RESET" "$*" >&2; exit 1; }
-step() { printf '\n  %s%s%s\n' "$BOLD" "$*" "$RESET"; }
+ok()   { printf '  %s✔%s %s\n' "$SLIME" "$RESET" "$*"; }
+warn() { printf '  %s▲%s %s\n' "$ORANGE" "$RESET" "$*"; }
+die()  { printf '  %s✖%s %s\n' "$DANGER" "$RESET" "$*" >&2; exit 1; }
+step() { printf '\n  %s%s%s\n' "$PURPLE$BOLD" "$*" "$RESET"; }
 
-printf '\n  %sGOLIATH%s %s· bootstrap%s\n' "$CYAN$BOLD" "$RESET" "$DIM" "$RESET"
+printf '\n  %sGOLIATH%s %s· bootstrap%s\n' "$SLIME$BOLD" "$RESET" "$MUTED" "$RESET"
 
 # --- Preflight --------------------------------------------------------------
 step "Checking prerequisites"
@@ -92,7 +105,7 @@ if [ -d "$DIR/.git" ]; then
 elif [ -e "$DIR" ] && [ -n "$(ls -A "$DIR" 2>/dev/null)" ]; then
   die "$DIR already exists and is not empty. Refusing to overwrite it — pass --dir to choose another location."
 else
-  say "Cloning $REPO ${DIM}(branch $REF)${RESET}"
+  say "Cloning $REPO ${MUTED}(branch $REF)${RESET}"
   git clone --depth 1 --branch "$REF" "$REPO" "$DIR" --quiet
   ok "Cloned into $DIR"
 fi
@@ -106,7 +119,7 @@ npm run setup
 case "$START_MODE" in
   none)
     step "Skipping start (--no-start)"
-    say "${DIM}Start it later with:${RESET} cd $DIR && npm run up"
+    say "${MUTED}Start it later with:${RESET} cd $DIR && npm run up"
     ;;
   foreground)
     step "Starting server in the foreground"
