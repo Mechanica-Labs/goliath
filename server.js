@@ -39,7 +39,7 @@ import { mountDocs } from './lib/openapi.js';
 import { initSentry, captureException as sentryCaptureException, setupExpressErrorHandler as setupSentryErrorHandler, flush as sentryFlush } from './lib/sentry.js';
 import { prepareExternalCamoufoxExecutable } from './lib/camoufox-executable.js';
 import { humanizedClick, humanizedOptions, humanizedScroll, humanizedType } from './lib/humanized-input.js';
-import { coerceHandsSteps, HandsError } from './lib/hands.js';
+import { coerceHandsSteps, HandsError, computeHandBudgetMs } from './lib/hands.js';
 import { behaviorReport, createBehaviorTracker, recordBehaviorEvent } from './lib/behavior.js';
 import { applyFingerprintCoherence } from './lib/fingerprint.js';
 import tui from './lib/tui.js';
@@ -4269,17 +4269,14 @@ app.post('/tabs/:tabId/hands', async (req, res) => {
     // handDeadline below already self-terminates cleanly so no hung step can
     // hold the lock indefinitely; we only bound the worst case with a generous
     // per-hand ceiling. Non-humanized (fast) hands keep the tight default.
+    // The math lives in lib/hands.js computeHandBudgetMs() so it's unit-testable.
     const profile = inputConfig.enabled ? inputConfig.profile : 'fast';
-    const perStepBudgetMs = profile === 'deliberate'
-      ? 15000
-      : profile === 'balanced'
-        ? 12000
-        : profile === 'fast'
-          ? 5000
-          : HANDLER_TIMEOUT_MS;
-    const handBudgetMs = inputConfig.enabled
-      ? Math.min(perStepBudgetMs * steps.length, 120000)
-      : HANDLER_TIMEOUT_MS;
+    const handBudgetMs = computeHandBudgetMs({
+      profile,
+      stepCount: steps.length,
+      humanizedEnabled: inputConfig.enabled,
+      handlerTimeoutMs: HANDLER_TIMEOUT_MS,
+    });
     const result = await withUserLimit(userId, () => withTabLock(tabId, async () => {
       // Computed inside the lock so time spent waiting in the user concurrency
       // queue does not eat the budget. Kept below handBudgetMs so the

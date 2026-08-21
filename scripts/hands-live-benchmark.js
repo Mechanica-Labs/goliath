@@ -172,6 +172,24 @@ function listen(server) {
 }
 
 async function main() {
+  if (process.argv.includes('--help') || process.argv.includes('-h')) {
+    process.stdout.write(`hands-live-benchmark — live smoke/benchmark for POST /tabs/:tabId/hands (voodoo hands)
+
+Requires an externally-booted goliath server (it does NOT spawn its own). Drives
+each behavioral gate through a single multi-step hands call against a real
+Camoufox browser and reports a per-family pass/fail scorecard.
+
+Usage:
+  node scripts/hands-live-benchmark.js [--help]
+
+Env:
+  GOLIATH_BASE   base URL of a running goliath server (default http://127.0.0.1:9378)
+  FAMILY         only run gates for one family, e.g. FAMILY=grid (default: all)
+
+Exit code is 0 when every gate passes, 1 otherwise.
+`);
+    return;
+  }
   const fixtureServer = http.createServer((req, res) => {
     const m = req.url?.match(/^\/gate\/([^/?]+)/);
     const gate = m && gates.find(g => g.id === decodeURIComponent(m[1]));

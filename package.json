@@ -154,6 +154,8 @@
     "test:mcp": "node scripts/test-mcp.mjs",
     "test": "NODE_OPTIONS='--experimental-vm-modules' jest --runInBand",
     "benchmark:behavior": "node scripts/behavioral-gate-harness.js",
+    "benchmark:hands": "node scripts/hands-live-benchmark.js",
+    "hands-smoke": "node scripts/hands-live-benchmark.js",
     "plugin": "node scripts/plugin.js",
     "generate-openapi": "node scripts/generate-openapi.js",
     "version:sync": "node scripts/sync-version.js",
