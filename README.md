@@ -15,15 +15,15 @@ Goliath is built first for Hermes: it prints ready-to-paste `config.yaml`, keeps
 Requirement: Node.js 22+. The one-time setup downloads about 300 MB for the browser engine.
 
 ```bash
-npm install @mechanica-labs/goliath
-npx camoufox-js fetch
-npx goliath setup
-npx goliath doctor
+npx -y @mechanica-labs/goliath@0.1.0 install
+npx -y @mechanica-labs/goliath@0.1.0 doctor
 ```
 
 If you already have a compatible Camoufox executable, set `GOLIATH_EXECUTABLE=/absolute/path/to/camoufox` instead of running `npx camoufox-js fetch`.
 
-`goliath setup` creates the private local data directories and prints ready-to-paste Hermes YAML plus JSON for other MCP clients. The generated Hermes command is pinned and self-contained:
+`goliath install` downloads and verifies Camoufox, proves the public MCP/browser/Hands path against Example Domain, and safely configures detected Codex, Claude Code, Cursor, Hermes, and OpenClaw installations. It backs up changed harness configuration, refuses to overwrite unmanaged Goliath entries unless a specific client is named with `--replace-existing`, and can be previewed with `--dry-run`.
+
+Use `goliath setup` when you only want ready-to-paste Hermes YAML plus JSON for another MCP client. The generated Hermes command is pinned and self-contained:
 
 ```yaml
 mcp_servers:
@@ -35,6 +35,8 @@ mcp_servers:
 ```
 
 Restart Hermes after adding the configuration. The MCP process checks for an existing local server and starts one when needed, then shuts down the server it owns when Hermes disconnects. There is no daemon to install or manage. Keep `GOLIATH_USER_ID` stable for each agent so its authenticated browser profile persists across tasks.
+
+Managed harness pins can be refreshed with `goliath upgrade` and removed with `goliath uninstall`. Uninstall leaves browser profiles, uploads, cookies, traces, and the shared Camoufox runtime in place.
 
 See the [Hermes-native harness setup guide](https://github.com/Mechanica-Labs/goliath/blob/main/docs/HARNESS_SETUP.md) for the full Hermes workflow, JSON-based MCP clients, remote-server configuration, uploads, and troubleshooting.
 
