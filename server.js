@@ -1,6 +1,7 @@
 import { VirtualDisplay } from 'camoufox-js/dist/virtdisplay.js';
 import { firefox } from 'playwright-core';
 import express from 'express';
+import { rateLimit } from 'express-rate-limit';
 import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
@@ -133,6 +134,16 @@ function log(level, msg, fields = {}) {
 
 const app = express();
 app.use(express.json({ limit: '100kb' }));
+const traceIoRateLimit = rateLimit({
+  windowMs: 60_000,
+  limit: 30,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  handler: (_req, res, _next, options) => res.status(options.statusCode).json({
+    error: 'too many trace requests',
+    code: 'rate_limited',
+  }),
+});
 
 // Request logging + metrics middleware
 app.use((req, res, next) => {
@@ -413,11 +424,11 @@ const TAB_INACTIVITY_MS = CONFIG.tabInactivityMs;
 const MAX_SESSIONS = CONFIG.maxSessions;
 const MAX_TABS_PER_SESSION = CONFIG.maxTabsPerSession;
 const MAX_TABS_GLOBAL = CONFIG.maxTabsGlobal;
-const HANDLER_TIMEOUT_MS = CONFIG.handlerTimeoutMs;
+const HANDLER_TIMEOUT_MS = Math.min(10 * 60_000, Math.max(1_000, Number(CONFIG.handlerTimeoutMs) || 30_000));
 const MAX_CONCURRENT_PER_USER = CONFIG.maxConcurrentPerUser;
 const PAGE_CLOSE_TIMEOUT_MS = 5000;
 const NAVIGATE_TIMEOUT_MS = CONFIG.navigateTimeoutMs;
-const BUILDREFS_TIMEOUT_MS = CONFIG.buildrefsTimeoutMs;
+const BUILDREFS_TIMEOUT_MS = Math.min(60_000, Math.max(1_000, Number(CONFIG.buildrefsTimeoutMs) || 12_000));
 const NATIVE_MEM_RESTART_THRESHOLD_MB = CONFIG.nativeMemRestartThresholdMb;
 let _nativeMemBaseline = null; // RSS - heapUsed at first idle measurement
 const FAILURE_THRESHOLD = 3;
@@ -636,7 +647,7 @@ if (proxyPool) {
   log('info', 'no proxy configured');
 }
 
-const BROWSER_IDLE_TIMEOUT_MS = CONFIG.browserIdleTimeoutMs;
+const BROWSER_IDLE_TIMEOUT_MS = Math.min(60 * 60_000, Math.max(1_000, Number(CONFIG.browserIdleTimeoutMs) || 300_000));
 let browserIdleTimer = null;
 let browserLaunchPromise = null;
 let browserWarmRetryTimer = null;
@@ -2085,6 +2096,10 @@ async function extractGoogleSerp(page) {
     const snapshot = [];
     const elements = [];
     let refCounter = 1;
+
+    function escapeQuotedSnapshotText(value) {
+      return String(value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/[\r\n]+/g, ' ');
+    }
     
     function addRef(role, name) {
       const id = 'e' + refCounter++;
@@ -2092,7 +2107,7 @@ async function extractGoogleSerp(page) {
       return id;
     }
     
-    snapshot.push('- heading "' + document.title.replace(/"/g, '\\"') + '"');
+    snapshot.push('- heading "' + escapeQuotedSnapshotText(document.title) + '"');
     
     const searchInput = document.querySelector('input[name="q"], textarea[name="q"]');
     if (searchInput) {
@@ -2124,7 +2139,7 @@ async function extractGoogleSerp(page) {
         const mainLink = h3 ? h3.closest('a') : null;
         
         if (h3 && mainLink) {
-          const title = h3.textContent.trim().replace(/"/g, '\\"');
+          const title = h3.textContent.trim();
           const href = mainLink.href;
           const cite = block.querySelector('cite');
           const displayUrl = cite ? cite.textContent.trim() : '';
@@ -2143,7 +2158,7 @@ async function extractGoogleSerp(page) {
           }
           
           const refId = addRef('link', title);
-          snapshot.push('- link "' + title + '" [' + refId + ']:');
+          snapshot.push('- link "' + escapeQuotedSnapshotText(title) + '" [' + refId + ']:');
           snapshot.push('  - /url: ' + href);
           if (displayUrl) snapshot.push('  - cite: ' + displayUrl);
           if (snippet) snapshot.push('  - text: ' + snippet);
@@ -2155,10 +2170,10 @@ async function extractGoogleSerp(page) {
               snapshot.push('- group:');
               snapshot.push('  - text: ' + blockText);
               blockLinks.forEach(a => {
-                const linkText = (a.textContent || '').trim().replace(/"/g, '\\"').slice(0, 100);
+                const linkText = (a.textContent || '').trim().slice(0, 100);
                 if (linkText.length > 2) {
                   const refId = addRef('link', linkText);
-                  snapshot.push('  - link "' + linkText + '" [' + refId + ']:');
+                  snapshot.push('  - link "' + escapeQuotedSnapshotText(linkText) + '" [' + refId + ']:');
                   snapshot.push('    - /url: ' + a.href);
                 }
               });
@@ -2172,10 +2187,10 @@ async function extractGoogleSerp(page) {
     if (paaItems.length > 0) {
       snapshot.push('- heading "People also ask"');
       paaItems.forEach(q => {
-        const text = (q.textContent || '').trim().replace(/"/g, '\\"').slice(0, 150);
+        const text = (q.textContent || '').trim().slice(0, 150);
         if (text) {
           const refId = addRef('button', text);
-          snapshot.push('  - button "' + text + '" [' + refId + ']');
+          snapshot.push('  - button "' + escapeQuotedSnapshotText(text) + '" [' + refId + ']');
         }
       });
     }
@@ -6011,6 +6026,12 @@ app.delete('/tabs/group/:listItemId', async (req, res) => {
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/Error'
+ *       429:
+ *         description: Too many trace requests.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
  *       500:
  *         description: Server error.
  *         content:
@@ -6018,7 +6039,7 @@ app.delete('/tabs/group/:listItemId', async (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-app.get('/sessions/:userId/traces', authMiddleware(), async (req, res) => {
+app.get('/sessions/:userId/traces', authMiddleware(), traceIoRateLimit, async (req, res) => {
   try {
     const userId = normalizeUserId(req.params.userId);
     const traces = await listUserTraces(CONFIG.tracesDir, userId);
@@ -6078,6 +6099,12 @@ app.get('/sessions/:userId/traces', authMiddleware(), async (req, res) => {
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/Error'
+ *       429:
+ *         description: Too many trace requests.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
  *       500:
  *         description: Server error.
  *         content:
@@ -6085,7 +6112,7 @@ app.get('/sessions/:userId/traces', authMiddleware(), async (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-app.get('/sessions/:userId/traces/:filename', authMiddleware(), async (req, res) => {
+app.get('/sessions/:userId/traces/:filename', authMiddleware(), traceIoRateLimit, async (req, res) => {
   try {
     const userId = normalizeUserId(req.params.userId);
     const full = resolveTracePath(CONFIG.tracesDir, userId, req.params.filename);
@@ -6157,6 +6184,12 @@ app.get('/sessions/:userId/traces/:filename', authMiddleware(), async (req, res)
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/Error'
+ *       429:
+ *         description: Too many trace requests.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
  *       500:
  *         description: Server error.
  *         content:
@@ -6164,7 +6197,7 @@ app.get('/sessions/:userId/traces/:filename', authMiddleware(), async (req, res)
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-app.delete('/sessions/:userId/traces/:filename', authMiddleware(), async (req, res) => {
+app.delete('/sessions/:userId/traces/:filename', authMiddleware(), traceIoRateLimit, async (req, res) => {
   try {
     const userId = normalizeUserId(req.params.userId);
     const full = resolveTracePath(CONFIG.tracesDir, userId, req.params.filename);
