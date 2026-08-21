@@ -152,7 +152,7 @@ curl -sS -X POST http://127.0.0.1:9377/tabs/TAB_ID/handoff \
   -d '{"userId":"agent1","action":"request","reason":"complete MFA"}'
 ```
 
-Checkpoints contain cookies, local storage, and IndexedDB and default to `~/.goliath/checkpoints/` (`GOLIATH_CHECKPOINTS_DIR` overrides it). They do not clone live DOM, the JavaScript heap, open connections, or remote server state. Forks create isolated contexts from that state, with the explicit checkpoint taking precedence over any old persistence profile for the destination user. Human handoff pauses mutating tab routes and prevents both individual-tab and tab-group deletion until the handoff is resumed or cancelled.
+Checkpoints contain cookies, local storage, and IndexedDB and are stored under the application-owned `~/.goliath/checkpoints/` directory. They do not clone live DOM, the JavaScript heap, open connections, or remote server state. Forks create isolated contexts from that state, with the explicit checkpoint taking precedence over any old persistence profile for the destination user. Human handoff pauses mutating tab routes and prevents both individual-tab and tab-group deletion until the handoff is resumed or cancelled.
 
 Semantic safety is fail-closed at the browser boundary: contracts are tied to one snapshot, domain policies run before execution, page instructions remain untrusted, and registered values are redacted from accessibility and semantic snapshots. Screenshot and arbitrary-evaluation endpoints remain privileged and can observe rendered data, so do not expose them to untrusted callers.
 

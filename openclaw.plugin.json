@@ -41,11 +41,6 @@
       "description": "External Goliath/Camoufox executable to use instead of downloading the bundled browser. Compatibility aliases: GOLIATH_EXECUTABLE_PATH, CAMOUFOX_EXECUTABLE, CAMOUFOX_EXECUTABLE_PATH, CAMOFOX_EXECUTABLE_PATH.",
       "required": false,
       "sensitive": false
-    },
-    "GOLIATH_CHECKPOINTS_DIR": {
-      "description": "Directory for storage-state checkpoints used by isolated session forks. Defaults to ~/.goliath/checkpoints.",
-      "required": false,
-      "sensitive": false
     }
   },
   "configSchema": {
