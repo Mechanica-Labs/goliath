@@ -5,18 +5,76 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Goliath API</title>
   <style>
-    :root { color-scheme: dark; font-family: ui-sans-serif, system-ui, sans-serif; }
-    body { max-width: 980px; margin: 0 auto; padding: 32px 20px 80px; background: #0b0d10; color: #e9eef5; }
-    a { color: #8ec5ff; } h1 { margin-bottom: 4px; } .muted { color: #9aa7b7; }
-    .route { margin: 14px 0; padding: 14px 16px; border: 1px solid #28313d; border-radius: 10px; background: #12161c; }
-    .method { display: inline-block; min-width: 58px; font-weight: 700; color: #8ee6b0; }
-    code { color: #d7e7ff; } .error { color: #ff9b9b; }
+    :root {
+      color-scheme: dark;
+      --goliath-void: #050009;
+      --goliath-void-2: #0B0612;
+      --goliath-panel: #16001F;
+      --goliath-slime: #B8FF00;
+      --goliath-purple: #C13CFF;
+      --goliath-cyan: #7DFFE0;
+      --goliath-ink: #F7FFE7;
+      --goliath-muted: #A78BB8;
+      --goliath-danger: #FF3158;
+      --goliath-font-ui: "Saira Condensed", "Oswald", "Archivo Narrow", system-ui, sans-serif;
+      --goliath-font-mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    html { background: var(--goliath-void); }
+    body {
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 40px 20px 80px;
+      color: var(--goliath-ink);
+      background:
+        radial-gradient(circle at 84% 10%, rgba(255,106,0,.16), transparent 28%),
+        radial-gradient(circle at 8% 0%, rgba(193,60,255,.18), transparent 30%),
+        linear-gradient(180deg, #08000d 0%, var(--goliath-void) 56%, #020004 100%);
+      font-family: var(--goliath-font-ui);
+    }
+    h1 {
+      margin: 0 0 8px;
+      color: var(--goliath-slime);
+      text-transform: uppercase;
+      letter-spacing: -.04em;
+      text-shadow: 0 2px 0 #050009, 0 0 16px rgba(184,255,0,.7);
+    }
+    .kicker {
+      margin: 0 0 28px;
+      color: var(--goliath-purple);
+      font-family: var(--goliath-font-mono);
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+    }
+    a { color: var(--goliath-cyan); }
+    .muted { color: var(--goliath-muted); }
+    .route {
+      margin: 12px 0;
+      padding: 14px 16px;
+      background: linear-gradient(180deg, rgba(33,0,46,.78), rgba(8,0,14,.88));
+      border: 2px solid color-mix(in srgb, var(--goliath-purple) 70%, transparent);
+      border-radius: 0;
+      box-shadow: inset 0 0 0 1px rgba(184,255,0,.12), 0 0 28px rgba(193,60,255,.12);
+    }
+    .method {
+      display: inline-block;
+      min-width: 58px;
+      color: var(--goliath-slime);
+      font-family: var(--goliath-font-mono);
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+    code {
+      color: var(--goliath-ink);
+      font-family: var(--goliath-font-mono);
+    }
+    .error { color: var(--goliath-danger); }
   </style>
 </head>
 <body>
   <h1>Goliath API</h1>
-  <p class="muted">Agent-first browser automation. <a href="/openapi.json">OpenAPI JSON</a></p>
-  <main id="routes"><p>Loading API specification…</p></main>
+  <p class="kicker">Agent-first browser automation · <a href="/openapi.json">OpenAPI JSON</a></p>
+  <main id="routes"><p class="muted">Loading API specification…</p></main>
   <script>
     const root = document.querySelector('#routes');
     fetch('/openapi.json').then((response) => {
