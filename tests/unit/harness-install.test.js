@@ -15,7 +15,7 @@ import { afterEach, expect, jest, test } from '@jest/globals';
 import { claudeCodeAdapter } from '../../lib/install/adapters/claude-code.js';
 import { codexAdapter } from '../../lib/install/adapters/codex.js';
 import { cursorAdapter } from '../../lib/install/adapters/cursor.js';
-import { entriesEqual, generatedMcpEntry } from '../../lib/install/adapters/base.js';
+import { entriesEqual, generatedMcpEntry, makeCommandAdapter } from '../../lib/install/adapters/base.js';
 import { hermesAdapter } from '../../lib/install/adapters/hermes.js';
 import { openClawAdapter } from '../../lib/install/adapters/openclaw.js';
 import { atomicWrite } from '../../lib/install/files.js';
@@ -68,6 +68,41 @@ function memoryAdapter(home, id, { initial = null, generated = generatedMcpEntry
     },
     setCurrent(value) { current = structuredClone(value); },
   };
+  return adapter;
+}
+
+function commandMemoryAdapter(home, id, { initial = null } = {}) {
+  const generated = generatedMcpEntry(id, '0.1.0');
+  let current = structuredClone(initial);
+  let interruptAfterRemove = false;
+  const adapter = makeCommandAdapter({
+    id,
+    identity: id,
+    executable: id,
+    version: '0.1.0',
+    entry: generated,
+    configPath: join(home, `${id}.json`),
+    add: value => ['add', JSON.stringify(value)],
+    remove: () => ['remove'],
+    read: () => ['read'],
+    parse: output => JSON.parse(output),
+    missing: () => false,
+    canRestore: () => true,
+    runCommand: async argv => {
+      if (argv[0] === 'read') return JSON.stringify(current);
+      if (argv[0] === 'remove') {
+        current = null;
+        if (interruptAfterRemove) throw interrupt();
+        return '';
+      }
+      if (argv[0] === 'add') {
+        current = JSON.parse(argv[1]);
+        return '';
+      }
+      throw new Error(`unexpected command: ${argv.join(' ')}`);
+    },
+  });
+  adapter.setInterruptAfterRemove = value => { interruptAfterRemove = value; };
   return adapter;
 }
 
@@ -364,6 +399,28 @@ test('interrupted uninstall rolls back safely and can be retried', async () => {
   expect(readJournal(harnessInstallPaths(home))).toBeNull();
 });
 
+test.each([
+  ['created entry', null],
+  ['replaced entry', { command: 'original', args: ['--keep'], env: { ORIGINAL: '1' } }],
+])('command adapter recovers an interrupted remove/add for a %s', async (_label, original) => {
+  const home = fixture();
+  const adapter = commandMemoryAdapter(home, 'codex', { initial: original });
+  const deps = dependencies(home, [adapter]);
+  const options = original == null ? {} : { clients: ['codex'], replaceExisting: true };
+  expect((await installHarnesses({ options, dependencies: deps })).status).toBe('ready');
+
+  adapter.setInterruptAfterRemove(true);
+  await expect(uninstallHarnesses({ dependencies: deps })).rejects.toThrow('simulated abrupt');
+  expect(await adapter.currentEntry()).toBeNull();
+  expect(readJournal(harnessInstallPaths(home))).not.toBeNull();
+
+  adapter.setInterruptAfterRemove(false);
+  const recovered = await uninstallHarnesses({ dependencies: deps });
+  expect(recovered.status).toBe('removed');
+  expect(await adapter.currentEntry()).toEqual(original);
+  expect(readJournal(harnessInstallPaths(home))).toBeNull();
+});
+
 test('lock acquisition never replaces a fresh empty lock or a live owner', () => {
   const home = fixture();
   const paths = harnessInstallPaths(home);
@@ -399,6 +456,31 @@ test('a contender can acquire while another owner candidate is unpublished witho
   expect(contender).toBeDefined();
   expect(() => acquireHarnessInstallLock(paths, { pid: 303, isAlive: () => true })).toThrow(/another Goliath harness install/);
   contender.release();
+});
+
+test('two stale-lock contenders fail closed without deleting or replacing the observed lock', () => {
+  const home = fixture();
+  const paths = harnessInstallPaths(home);
+  mkdirSync(dirname(paths.lock), { recursive: true, mode: 0o700 });
+  const staleOwner = { pid: 401, token: 'stale-owner-token', startedAt: '2020-01-01T00:00:00.000Z' };
+  writeFileSync(paths.lock, `${JSON.stringify(staleOwner)}\n`, { mode: 0o600 });
+
+  let secondError;
+  expect(() => acquireHarnessInstallLock(paths, {
+    pid: 402,
+    isAlive: () => {
+      try {
+        acquireHarnessInstallLock(paths, { pid: 403, isAlive: () => false, staleMs: 0 });
+      } catch (error) {
+        secondError = error;
+      }
+      return false;
+    },
+    staleMs: 0,
+  })).toThrow(/stale Goliath harness install lock/);
+
+  expect(secondError?.message).toMatch(/stale Goliath harness install lock/);
+  expect(JSON.parse(readFileSync(paths.lock, 'utf8'))).toEqual(staleOwner);
 });
 
 test('atomic writes preserve permissions on an existing harness directory', () => {
