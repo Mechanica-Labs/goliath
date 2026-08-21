@@ -2779,7 +2779,7 @@ app.post('/tabs', async (req, res) => {
       try {
         let totalTabs = 0;
         for (const group of session.tabGroups.values()) totalTabs += group.size;
-      
+
         // Recycle oldest tab when limits are reached instead of rejecting
         if (totalTabs >= MAX_TABS_PER_SESSION || getTotalTabCount() >= MAX_TABS_GLOBAL) {
           const recycled = await recycleOldestTab(session, req.reqId, userId);
@@ -2945,7 +2945,7 @@ app.post('/tabs/:tabId/navigate', async (req, res) => {
       const resolvedSessionKey = sessionKey || listItemId || found.listItemId || 'default';
       let tabState = found.tabState;
       tabState.toolCalls++; tabState.consecutiveTimeouts = 0; tabState.consecutiveFailures = 0;
-      
+
       let targetUrl = url;
       if (macro && macro !== '__NO__' && macro !== 'none' && macro !== 'null') {
         targetUrl = expandMacro(macro, query) || url;
@@ -3220,11 +3220,11 @@ app.get('/tabs/:tabId/snapshot', async (req, res) => {
         }
         return response;
       }
-      
+
       const ariaContexts = await captureAriaContexts(tabState.page);
       tabState.refs = buildRefsFromContexts(ariaContexts);
       const annotatedYaml = redactSecretValues(formatAriaContexts(ariaContexts, tabState.refs), session);
-      
+
       tabState.lastSnapshot = annotatedYaml;
       if (annotatedYaml) snapshotBytes.labels('full').observe(Buffer.byteLength(annotatedYaml, 'utf8'));
       const win = windowSnapshot(annotatedYaml, 0);
