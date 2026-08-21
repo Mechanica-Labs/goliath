@@ -52,6 +52,13 @@ curl -X POST http://127.0.0.1:9377/tabs \
 
 `goliath serve` installs a missing browser engine automatically; `npx camoufox-js fetch` is the explicit equivalent. Snapshot refs reset when a page navigates or materially changes, so request a fresh snapshot before retrying a stale ref.
 
+Screenshots default to PNG bytes. Pass `path` to write a file instead and get JSON `{ path, bytes, fullPage }`. Relative paths resolve from `GOLIATH_WORKSPACE` when set, otherwise `GOLIATH_SCREENSHOTS_DIR` (`~/.goliath/screenshots`). Paths must stay inside the workspace or screenshot directory.
+
+```bash
+curl -o page.png 'http://127.0.0.1:9377/tabs/TAB_ID/screenshot?userId=agent-1'
+curl 'http://127.0.0.1:9377/tabs/TAB_ID/screenshot?userId=agent-1&fullPage=true&path=shots/page.png'
+```
+
 ## Server lifecycle
 
 Goliath can run in the foreground for a harness or supervisor, or manage a background process that is health-checked before the command returns:

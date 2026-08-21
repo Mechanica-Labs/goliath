@@ -29,6 +29,7 @@ import { findPausedHandoff, findPausedHandoffInSession, handoffPausedError, paus
 import { resolveRefTarget, validateSecretTarget } from './lib/frame-targets.js';
 import { SessionReservationRegistry } from './lib/session-reservations.js';
 import { resolveUploadPaths } from './lib/upload-paths.js';
+import { writeOutputFile } from './lib/file-output.js';
 import {
   ensureTracesDir, resolveTracePath, tracePathFor, makeTraceFilename,
   listUserTraces, statTrace, deleteTrace, sweepOldTraces,
@@ -5468,7 +5469,7 @@ app.get('/tabs/:tabId/images', async (req, res) => {
  *   get:
  *     tags: [Content]
  *     summary: Take a screenshot
- *     description: Returns a base64-encoded PNG screenshot.
+ *     description: Returns a PNG screenshot. When path is set, writes the PNG and returns JSON metadata instead of image bytes.
  *     parameters:
  *       - name: tabId
  *         in: path
@@ -5480,21 +5481,41 @@ app.get('/tabs/:tabId/images', async (req, res) => {
  *         required: true
  *         schema:
  *           type: string
+ *       - name: fullPage
+ *         in: query
+ *         required: false
+ *         schema:
+ *           type: boolean
+ *       - name: path
+ *         in: query
+ *         required: false
+ *         description: Destination PNG path. Relative paths resolve from GOLIATH_WORKSPACE when set, otherwise GOLIATH_SCREENSHOTS_DIR.
+ *         schema:
+ *           type: string
  *     responses:
  *       200:
- *         description: Screenshot.
+ *         description: Screenshot PNG, or JSON metadata when path is set.
  *         content:
+ *           image/png:
+ *             schema:
+ *               type: string
+ *               format: binary
  *           application/json:
  *             schema:
  *               type: object
  *               properties:
- *                 screenshot:
- *                   type: object
- *                   properties:
- *                     data:
- *                       type: string
- *                     mimeType:
- *                       type: string
+ *                 path:
+ *                   type: string
+ *                 bytes:
+ *                   type: integer
+ *                 fullPage:
+ *                   type: boolean
+ *       400:
+ *         description: Invalid output path.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
  *       404:
  *         description: Tab not found.
  *         content:
@@ -5506,16 +5527,24 @@ app.get('/tabs/:tabId/screenshot', async (req, res) => {
   try {
     const userId = req.query.userId;
     const fullPage = req.query.fullPage === 'true';
+    const savePath = typeof req.query.path === 'string' ? req.query.path.trim() : '';
     const session = sessions.get(normalizeUserId(userId));
     const found = session && findTab(session, req.params.tabId);
     if (!found) return tabNotFoundResponse(res, req.params.tabId || req.body?.tabId);
     session.lastAccess = Date.now();
-    
+
     const { tabState } = found;
     const buffer = await tabState.page.screenshot({ type: 'png', fullPage });
     pluginEvents.emit('tab:screenshot', { userId, tabId: req.params.tabId, buffer });
-    res.set('Content-Type', 'image/png');
-    res.send(buffer);
+    if (!savePath) {
+      res.set('Content-Type', 'image/png');
+      return res.send(buffer);
+    }
+    const dest = await writeOutputFile(savePath, buffer, {
+      workspaceDir: CONFIG.workspaceDir,
+      screenshotsDir: CONFIG.screenshotsDir,
+    });
+    res.json({ path: dest, bytes: buffer.length, fullPage });
   } catch (err) {
     log('error', 'screenshot failed', { reqId: req.reqId, error: err.message });
     handleRouteError(err, req, res);

@@ -1,10 +1,9 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test, expect } from '@jest/globals';
 
-import { TOOL_DEFS, TOOL_NAMES, adaptResponse, buildRequest, persistScreenshot } from '../../mcp/tool-contracts.mjs';
+import { TOOL_DEFS, TOOL_NAMES, buildRequest } from '../../mcp/tool-contracts.mjs';
 
 const root = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const manifest = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8'));
@@ -87,44 +86,28 @@ test('MCP semantic requests preserve snapshot and session boundaries', () => {
   });
 });
 
-test('MCP screenshot persist stays off the REST query', () => {
+test('MCP screenshot path is forwarded to REST as JSON metadata', () => {
   const request = buildRequest(
     'goliath_screenshot',
-    { tabId: 'tab/a', fullPage: true, persist: true },
+    { tabId: 'tab/a', fullPage: true, path: 'shots/page.png' },
     { userId: 'agent-1', sessionKey: 'task-1' },
   );
-  expect(request).toMatchObject({
+  expect(request).toEqual({
     method: 'GET',
-    path: '/tabs/tab%2Fa/screenshot?userId=agent-1&fullPage=true',
-    responseKind: 'image',
-    persist: true,
-    tabId: 'tab/a',
+    path: '/tabs/tab%2Fa/screenshot?userId=agent-1&fullPage=true&path=shots%2Fpage.png',
+    responseKind: 'json',
   });
-  expect(request.path).not.toContain('persist');
 });
 
-test('persisted screenshots stay inside the configured directory', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'goliath-screenshots-'));
-  try {
-    const png = Buffer.from('89504e470d0a1a0a', 'hex');
-    const filePath = persistScreenshot(png, { screenshotsDir: dir, tabId: 'tab/a' });
-    expect(filePath.startsWith(`${dir}/`)).toBe(true);
-    expect(filePath).toMatch(/tab_a-\d+\.png$/);
-    expect(readFileSync(filePath)).toEqual(png);
-
-    const content = adaptResponse({ responseKind: 'image' }, {
-      type: 'image',
-      data: png.toString('base64'),
-      mimeType: 'image/png',
-      path: filePath,
-      bytes: png.length,
-    });
-    expect(content[0]).toEqual({
-      type: 'text',
-      text: JSON.stringify({ path: filePath, bytes: png.length }, null, 2),
-    });
-    expect(content[1]).toEqual({ type: 'image', data: png.toString('base64'), mimeType: 'image/png' });
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+test('MCP screenshot without path still requests image bytes', () => {
+  const request = buildRequest(
+    'goliath_screenshot',
+    { tabId: 'tab/a' },
+    { userId: 'agent-1', sessionKey: 'task-1' },
+  );
+  expect(request).toEqual({
+    method: 'GET',
+    path: '/tabs/tab%2Fa/screenshot?userId=agent-1',
+    responseKind: 'image',
+  });
 });

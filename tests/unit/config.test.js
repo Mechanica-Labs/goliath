@@ -81,3 +81,14 @@ test('screenshot directory can be overridden', () => {
     process.env = before;
   }
 });
+
+test('workspace directory can be overridden', () => {
+  const before = { ...process.env };
+  try {
+    process.env.GOLIATH_WORKSPACE = '/tmp/goliath-workspace';
+    expect(loadConfig().workspaceDir).toBe('/tmp/goliath-workspace');
+    expect(loadConfig().serverEnv.GOLIATH_WORKSPACE).toBe('/tmp/goliath-workspace');
+  } finally {
+    process.env = before;
+  }
+});

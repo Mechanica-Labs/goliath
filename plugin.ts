@@ -720,18 +720,23 @@ export default function register(api: PluginApi) {
 
   api.registerTool((ctx: ToolContext) => ({
     name: "goliath_screenshot",
-    description: "Take a screenshot of a Goliath page.",
+    description: "Take a screenshot of a Goliath page. Set path to write a PNG and return JSON metadata instead of image bytes.",
     parameters: {
       type: "object",
       properties: {
         tabId: { type: "string", description: "Tab identifier" },
+        fullPage: { type: "boolean", description: "Capture the full scrollable page" },
+        path: { type: "string", description: "Destination PNG path. Relative paths resolve from GOLIATH_WORKSPACE when set, otherwise GOLIATH_SCREENSHOTS_DIR." },
       },
       required: ["tabId"],
     },
     async execute(_id, params) {
-      const { tabId } = params as { tabId: string };
+      const { tabId, fullPage, path: savePath } = params as { tabId: string; fullPage?: boolean; path?: string };
       const userId = ctx.agentId || fallbackUserId;
-      const url = `${baseUrl}/tabs/${tabId}/screenshot?userId=${userId}`;
+      const query = new URLSearchParams({ userId });
+      if (fullPage != null) query.set("fullPage", String(fullPage));
+      if (savePath) query.set("path", savePath);
+      const url = `${baseUrl}/tabs/${tabId}/screenshot?${query}`;
       const accessKey = configuredAccessKey || loadConfig().accessKey;
       const res = await fetch(url, {
         headers: accessKey ? { Authorization: `Bearer ${accessKey}` } : {},
@@ -740,9 +745,10 @@ export default function register(api: PluginApi) {
         const text = await res.text();
         throw new Error(`${res.status}: ${text}`);
       }
-      // Guard: if server returns JSON/text instead of image (e.g. error with 200),
-      // return as text to avoid crashing the client with base64-encoded JSON.
       const contentType = res.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) {
+        return { content: [{ type: "text", text: await res.text() }] };
+      }
       if (!contentType.startsWith('image/')) {
         const text = await res.text();
         return { content: [{ type: "text", text: `Screenshot failed: ${text}` }] };

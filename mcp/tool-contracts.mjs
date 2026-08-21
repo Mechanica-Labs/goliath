@@ -1,5 +1,4 @@
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { resolve } from 'node:path';
 
 import { readCookieFile } from '../lib/cookies.js';
 
@@ -345,13 +344,13 @@ export const TOOL_DEFS = [
   },
   {
     name: 'goliath_screenshot',
-    description: 'Capture the current page as a PNG image. Set persist to write the PNG under GOLIATH_SCREENSHOTS_DIR and return that path.',
+    description: 'Capture the current page as a PNG image. Set path to write the PNG and return JSON metadata instead of image bytes.',
     inputSchema: {
       type: 'object',
       properties: {
         tabId: { type: 'string' },
         fullPage: { type: 'boolean' },
-        persist: { type: 'boolean', description: 'Write the PNG to disk and return its absolute path' },
+        path: { type: 'string', description: 'Destination PNG path. Relative paths resolve from GOLIATH_WORKSPACE when set, otherwise GOLIATH_SCREENSHOTS_DIR.' },
       },
       required: ['tabId'],
       additionalProperties: false,
@@ -466,12 +465,11 @@ export function buildRequest(name, args, ctx) {
     case 'goliath_screenshot': {
       const query = new URLSearchParams({ userId });
       if (args.fullPage != null) query.set('fullPage', String(args.fullPage));
+      if (args.path) query.set('path', args.path);
       return {
         method: 'GET',
         path: tabPath(args.tabId, `/screenshot?${query}`),
-        responseKind: 'image',
-        persist: args.persist === true,
-        tabId: args.tabId,
+        responseKind: args.path ? 'json' : 'image',
       };
     }
     case 'goliath_evaluate':
@@ -512,16 +510,6 @@ function bearerFor(spec, config) {
   return config.accessKey;
 }
 
-export function persistScreenshot(buffer, { screenshotsDir, tabId }) {
-  if (!screenshotsDir) throw new Error('GOLIATH_SCREENSHOTS_DIR is not configured');
-  const dir = resolve(screenshotsDir);
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const safeTab = String(tabId || 'tab').replace(/[^A-Za-z0-9._-]+/g, '_').slice(0, 80) || 'tab';
-  const filePath = join(dir, `${safeTab}-${Date.now()}.png`);
-  writeFileSync(filePath, buffer, { mode: 0o600 });
-  return filePath;
-}
-
 export async function fetchRequest(baseUrl, spec, config) {
   const bearer = bearerFor(spec, config);
   const headers = {};
@@ -540,26 +528,13 @@ export async function fetchRequest(baseUrl, spec, config) {
   if (spec.responseKind === 'image') {
     const mimeType = response.headers.get('content-type') || '';
     if (!mimeType.startsWith('image/')) throw new Error(`Screenshot returned ${mimeType || 'an unknown content type'}`);
-    const buffer = Buffer.from(await response.arrayBuffer());
-    const payload = { type: 'image', data: buffer.toString('base64'), mimeType };
-    if (spec.persist) {
-      payload.path = persistScreenshot(buffer, { screenshotsDir: config.screenshotsDir, tabId: spec.tabId });
-      payload.bytes = buffer.length;
-    }
-    return payload;
+    return { type: 'image', data: Buffer.from(await response.arrayBuffer()).toString('base64'), mimeType };
   }
   return response.json();
 }
 
 export function adaptResponse(spec, payload) {
-  if (spec.responseKind === 'image') {
-    const image = { type: 'image', data: payload.data, mimeType: payload.mimeType };
-    if (!payload.path) return [image];
-    return [
-      { type: 'text', text: JSON.stringify({ path: payload.path, bytes: payload.bytes }, null, 2) },
-      image,
-    ];
-  }
+  if (spec.responseKind === 'image') return [payload];
   if (spec.responseKind === 'snapshot') {
     const { screenshot, ...snapshot } = payload || {};
     const content = [{ type: 'text', text: JSON.stringify(snapshot, null, 2) }];
