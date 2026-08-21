@@ -1,0 +1,17 @@
+{
+  "id": "goliath",
+  "name": "Goliath",
+  "version": "0.1.0",
+  "plugins": {
+    "youtube": {
+      "enabled": true
+    },
+    "persistence": {
+      "enabled": true
+    },
+    "vnc": {
+      "enabled": false,
+      "resolution": "1920x1080"
+    }
+  }
+}

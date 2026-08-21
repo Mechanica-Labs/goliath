@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Goliath API</title>
+  <style>
+    :root { color-scheme: dark; font-family: ui-sans-serif, system-ui, sans-serif; }
+    body { max-width: 980px; margin: 0 auto; padding: 32px 20px 80px; background: #0b0d10; color: #e9eef5; }
+    a { color: #8ec5ff; } h1 { margin-bottom: 4px; } .muted { color: #9aa7b7; }
+    .route { margin: 14px 0; padding: 14px 16px; border: 1px solid #28313d; border-radius: 10px; background: #12161c; }
+    .method { display: inline-block; min-width: 58px; font-weight: 700; color: #8ee6b0; }
+    code { color: #d7e7ff; } .error { color: #ff9b9b; }
+  </style>
+</head>
+<body>
+  <h1>Goliath API</h1>
+  <p class="muted">Agent-first browser automation. <a href="/openapi.json">OpenAPI JSON</a></p>
+  <main id="routes"><p>Loading API specification…</p></main>
+  <script>
+    const root = document.querySelector('#routes');
+    fetch('/openapi.json').then((response) => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.json();
+    }).then((spec) => {
+      root.replaceChildren();
+      for (const [path, operations] of Object.entries(spec.paths || {})) {
+        for (const [method, operation] of Object.entries(operations)) {
+          const article = document.createElement('article');
+          article.className = 'route';
+          const title = document.createElement('div');
+          title.innerHTML = `<span class="method">${method.toUpperCase()}</span> <code></code>`;
+          title.querySelector('code').textContent = path;
+          const summary = document.createElement('div');
+          summary.className = 'muted';
+          summary.textContent = operation.summary || '';
+          article.append(title, summary);
+          root.append(article);
+        }
+      }
+    }).catch((error) => {
+      root.innerHTML = `<p class="error">Unable to load the API specification: ${error.message}</p>`;
+    });
+  </script>
+</body>
+</html>

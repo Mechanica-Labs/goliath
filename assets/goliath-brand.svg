@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" role="img" aria-labelledby="title desc">
+  <title id="title">Goliath</title>
+  <desc id="desc">Geometric gold G mark with the Goliath name on a dark technical grid.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#080b14"/>
+      <stop offset="1" stop-color="#121a2b"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffe38a"/>
+      <stop offset="0.48" stop-color="#f6b73c"/>
+      <stop offset="1" stop-color="#d98518"/>
+    </linearGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" fill="none" stroke="#8da2c9" stroke-opacity="0.08"/>
+    </pattern>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="16" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <rect width="1280" height="640" fill="url(#background)"/>
+  <rect width="1280" height="640" fill="url(#grid)"/>
+  <path d="M0 520L510 10H690L60 640H0Z" fill="#f6b73c" opacity="0.035"/>
+  <path d="M720 640L1280 80V270L910 640Z" fill="#8da2c9" opacity="0.035"/>
+
+  <g transform="translate(92 128)">
+    <rect width="384" height="384" rx="88" fill="#05070d" stroke="#f6b73c" stroke-opacity="0.34" stroke-width="2"/>
+    <circle cx="192" cy="192" r="129" fill="none" stroke="url(#gold)" stroke-width="66" filter="url(#glow)"/>
+    <rect x="249" y="65" width="90" height="127" fill="#05070d"/>
+    <path d="M199 190H324V317H263V251H199Z" fill="url(#gold)"/>
+    <circle cx="192" cy="192" r="13" fill="#ffe38a"/>
+  </g>
+
+  <g transform="translate(540 174)">
+    <text x="0" y="118" fill="#f7f9ff" font-family="Arial, Helvetica, sans-serif" font-size="112" font-weight="800" letter-spacing="8">GOLIATH</text>
+    <rect y="153" width="596" height="3" rx="1.5" fill="url(#gold)"/>
+    <text x="2" y="211" fill="#b8c4dc" font-family="Arial, Helvetica, sans-serif" font-size="27" font-weight="600" letter-spacing="7">HEADLESS BROWSER AUTOMATION</text>
+    <g transform="translate(2 257)" fill="#f6b73c" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="700" letter-spacing="3">
+      <text x="0" y="0">LOCAL</text>
+      <circle cx="99" cy="-6" r="3"/>
+      <text x="123" y="0">CLOUD</text>
+      <circle cx="225" cy="-6" r="3"/>
+      <text x="249" y="0">AGENTS</text>
+    </g>
+  </g>
+</svg>

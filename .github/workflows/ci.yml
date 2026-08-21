@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GOLIATH_SKIP_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+      - run: npm test
+      - name: Verify openapi.json is current
+        run: |
+          npm run generate-openapi
+          git diff --exit-code openapi.json || (echo "openapi.json is out of date; run npm run generate-openapi" && exit 1)
+      - name: Verify generated plugin is current
+        run: git diff --exit-code -- plugin.js dist/plugin.js
+
+  package-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GOLIATH_SKIP_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Pack and inspect tarball
+        run: |
+          set -e
+          OUT="$(mktemp)"
+          npm pack --dry-run > "$OUT" 2>&1
+          cat "$OUT"
+          if grep -E '(^|[ /])(\.env|\.npmrc|node_modules|\.tgz|id_ed25519|\.pem|\.git)([ /]|$)' "$OUT"; then
+            echo "ERROR: forbidden file would be published" >&2
+            exit 1
+          fi

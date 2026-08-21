@@ -1,0 +1,18 @@
+Goliath is a browser automation package for authorized AI-agent workflows.
+
+Dual-use functionality includes an anti-detection Camoufox browser runtime,
+persistent authenticated sessions, arbitrary JavaScript evaluation inside pages,
+file uploads, cookie import, proxy support, and human-like browser interactions.
+These capabilities can resemble security or evasion tooling to automated package
+scanners.
+
+The intended legitimate uses are agent-assisted form and document workflows,
+accessibility and quality assurance, research, authenticated personal-assistant
+tasks, and automation of websites the operator is authorized to access. Goliath
+does not grant permission to bypass access controls, violate website terms,
+impersonate another person, or access systems or data without authorization.
+
+The package is open source and its network, authentication, telemetry, upload,
+and browser-launch behavior can be audited in the published source. Telemetry is
+disabled by default, remote binding requires an access key, and uploaded file
+paths are confined to an operator-configured directory.
