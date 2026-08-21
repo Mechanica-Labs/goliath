@@ -511,6 +511,7 @@ async function withTabGroupMutationLocks(tabEntries, operation, index = 0) {
 }
 
 const MAX_OPERATION_TIMEOUT_MS = 10 * 60_000;
+const OPERATION_TIMEOUT_POLL_MS = 250;
 
 async function withTimeout(promise, ms, label) {
   const timeoutMs = Number(ms);
@@ -519,14 +520,20 @@ async function withTimeout(promise, ms, label) {
   }
   let timer;
   try {
+    const deadline = Date.now() + timeoutMs;
     return await Promise.race([
       promise,
       new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+        timer = setInterval(() => {
+          if (Date.now() >= deadline) {
+            clearInterval(timer);
+            reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+          }
+        }, OPERATION_TIMEOUT_POLL_MS);
       }),
     ]);
   } finally {
-    clearTimeout(timer);
+    clearInterval(timer);
   }
 }
 
