@@ -30,6 +30,16 @@ describe('resolveUploadPaths', () => {
       .rejects.toMatchObject({ code: 'invalid_upload_path', statusCode: 400 });
   });
 
+  test('accepts regular files in nested upload directories', async () => {
+    const nestedDir = path.join(uploadsDir, 'forms', 'signed');
+    const filePath = path.join(nestedDir, 'certificate.pdf');
+    await fs.mkdir(nestedDir, { recursive: true });
+    await fs.writeFile(filePath, 'certificate');
+
+    await expect(resolveUploadPaths({ uploadsDir, filePaths: [filePath] }))
+      .resolves.toEqual([await fs.realpath(filePath)]);
+  });
+
   test('rejects files outside the configured root', async () => {
     const outsidePath = path.join(tempDir, 'outside.txt');
     await fs.writeFile(outsidePath, 'private');

@@ -59,6 +59,10 @@ import {
 } from './lib/session-lifecycle.js';
 
 const CONFIG = loadConfig();
+function selectAllowedDuration(value, allowed, fallback) {
+  const requested = Number(value);
+  return allowed.find(duration => duration === requested) ?? fallback;
+}
 const runtimeInterval = (...args) => {
   const timer = globalThis.setInterval(...args);
   if (CONFIG.nodeEnv === 'test') timer.unref();
@@ -428,7 +432,11 @@ const HANDLER_TIMEOUT_MS = Math.min(10 * 60_000, Math.max(1_000, Number(CONFIG.h
 const MAX_CONCURRENT_PER_USER = CONFIG.maxConcurrentPerUser;
 const PAGE_CLOSE_TIMEOUT_MS = 5000;
 const NAVIGATE_TIMEOUT_MS = CONFIG.navigateTimeoutMs;
-const BUILDREFS_TIMEOUT_MS = Math.min(60_000, Math.max(1_000, Number(CONFIG.buildrefsTimeoutMs) || 12_000));
+const BUILDREFS_TIMEOUT_MS = selectAllowedDuration(
+  CONFIG.buildrefsTimeoutMs,
+  [1_000, 2_500, 5_000, 12_000, 30_000, 60_000],
+  12_000,
+);
 const NATIVE_MEM_RESTART_THRESHOLD_MB = CONFIG.nativeMemRestartThresholdMb;
 let _nativeMemBaseline = null; // RSS - heapUsed at first idle measurement
 const FAILURE_THRESHOLD = 3;
@@ -647,7 +655,11 @@ if (proxyPool) {
   log('info', 'no proxy configured');
 }
 
-const BROWSER_IDLE_TIMEOUT_MS = Math.min(60 * 60_000, Math.max(1_000, Number(CONFIG.browserIdleTimeoutMs) || 300_000));
+const BROWSER_IDLE_TIMEOUT_MS = selectAllowedDuration(
+  CONFIG.browserIdleTimeoutMs,
+  [1_000, 30_000, 60_000, 300_000, 600_000, 1_800_000, 3_600_000],
+  300_000,
+);
 let browserIdleTimer = null;
 let browserLaunchPromise = null;
 let browserWarmRetryTimer = null;
