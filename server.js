@@ -486,11 +486,21 @@ function getTabLock(tabId) {
 
 // Timeout is INSIDE the lock so each operation gets its full budget
 // regardless of how long it waited in the queue.
-async function withTabLock(tabId, operation, timeoutMs = HANDLER_TIMEOUT_MS) {
+async function withTabLock(tabId, operation, timeoutMs = HANDLER_TIMEOUT_MS, { onTimeout = null } = {}) {
   const lock = getTabLock(tabId);
   await lock.acquire(TAB_LOCK_TIMEOUT_MS);
+  const operationPromise = Promise.resolve().then(operation);
   try {
-    return await withTimeout(operation(), timeoutMs, 'action');
+    return await withTimeout(operationPromise, timeoutMs, 'action');
+  } catch (error) {
+    if (error?.code === 'operation_timeout') {
+      if (onTimeout) await onTimeout(error).catch(() => {});
+      // A timeout reports a deadline, not cancellation. Keep the lock until the
+      // underlying operation settles so handoff cannot claim the tab is paused
+      // while a timed-out mutation is still changing it.
+      await operationPromise.catch(() => {});
+    }
+    throw error;
   } finally {
     lock.release();
   }
@@ -501,7 +511,17 @@ async function withTabMutationLock(tabId, tabState, operation, timeoutMs = HANDL
     const handoff = pausedHandoff(tabState);
     if (handoff) throw handoffPausedError(handoff);
     return operation();
-  }, timeoutMs);
+  }, timeoutMs, {
+    onTimeout: async () => {
+      const page = tabState?.page;
+      if (!page || page.isClosed?.() || typeof page.close !== 'function') return;
+      await withTimeout(
+        page.close({ runBeforeUnload: false }),
+        PAGE_CLOSE_TIMEOUT_MS,
+        'timed-out mutation page close',
+      );
+    },
+  });
 }
 
 async function withTabGroupMutationLocks(tabEntries, operation, index = 0) {
@@ -527,7 +547,9 @@ async function withTimeout(promise, ms, label) {
         timer = setInterval(() => {
           if (Date.now() >= deadline) {
             clearInterval(timer);
-            reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+            reject(Object.assign(new Error(`${label} timed out after ${timeoutMs}ms`), {
+              code: 'operation_timeout',
+            }));
           }
         }, OPERATION_TIMEOUT_POLL_MS);
       }),
@@ -3199,10 +3221,9 @@ app.get('/tabs/:tabId/snapshot', async (req, res) => {
         return response;
       }
       
-      tabState.refs = await refreshTabRefs(tabState, { reason: 'snapshot' });
-      const ariaYaml = await getAriaSnapshot(tabState.page);
-      
-      const annotatedYaml = redactSecretValues(annotateAriaSnapshot(ariaYaml, tabState.refs), session);
+      const ariaContexts = await captureAriaContexts(tabState.page);
+      tabState.refs = buildRefsFromContexts(ariaContexts);
+      const annotatedYaml = redactSecretValues(formatAriaContexts(ariaContexts, tabState.refs), session);
       
       tabState.lastSnapshot = annotatedYaml;
       if (annotatedYaml) snapshotBytes.labels('full').observe(Buffer.byteLength(annotatedYaml, 'utf8'));
@@ -5845,6 +5866,11 @@ app.delete('/tabs/:tabId', async (req, res) => {
         await safePageClose(found.tabState.page);
         found.group.delete(req.params.tabId);
         if (found.group.size === 0) session.tabGroups.delete(found.listItemId);
+        const lock = tabLocks.get(req.params.tabId);
+        if (lock) {
+          lock.drain();
+          tabLocks.delete(req.params.tabId);
+        }
       });
       refreshActiveTabsGauge();
       log('info', 'tab closed', { reqId: req.reqId, tabId: req.params.tabId, userId });
@@ -5924,6 +5950,11 @@ app.delete('/tabs/group/:listItemId', async (req, res) => {
           await safePageClose(tabState.page);
         }
         session.tabGroups.delete(req.params.listItemId);
+        for (const [tabId] of tabEntries) {
+          const lock = tabLocks.get(tabId);
+          if (lock) lock.drain();
+          tabLocks.delete(tabId);
+        }
       });
       refreshTabLockQueueDepth();
       refreshActiveTabsGauge();
@@ -6459,7 +6490,7 @@ app.delete('/sessions/:userId', authMiddleware(), async (req, res) => {
         .sort(([a], [b]) => a.localeCompare(b));
       await withTabGroupMutationLocks(tabEntries, async () => {
         if (sessions.get(userId) !== session) return;
-        await closeSession(userId, session, { reason: 'api_delete_session', clearDownloads: true, clearLocks: false });
+        await closeSession(userId, session, { reason: 'api_delete_session', clearDownloads: true, clearLocks: true });
       });
       log('info', 'session closed', { userId });
     }
@@ -7775,6 +7806,7 @@ const __testing = CONFIG.nodeEnv === 'test' ? {
   tabLocks,
   closeReapableSession,
   withTabLock,
+  withTabMutationLock,
   setBrowser(value) { browser = value; },
 } : null;
 

@@ -16,6 +16,8 @@ function makeSession(tabId = 'tab-route-test') {
     evaluate: jest.fn(async expression => `evaluated:${expression}`),
     locator: jest.fn(),
     isClosed: () => false,
+    close: jest.fn(async () => {}),
+    removeAllListeners: jest.fn(),
   };
   const tabState = {
     page,
@@ -232,6 +234,71 @@ test('handoff wins atomically against a concurrent session timeout', async () =>
   await expect(timeout).resolves.toBe(false);
   expect(__testing.sessions.get('timeout-user')).toBe(session);
   expect(session.context.close).not.toHaveBeenCalled();
+});
+
+test('timed-out mutation keeps the lock until late work settles before handoff pauses', async () => {
+  const tabId = 'timeout-late-mutation-tab';
+  const { session, tabState, page } = makeSession(tabId);
+  __testing.sessions.set('route-user', session);
+  const order = [];
+  let releaseMutation;
+  const mutationGate = new Promise(resolve => { releaseMutation = resolve; });
+
+  const mutation = __testing.withTabMutationLock(tabId, tabState, async () => {
+    await mutationGate;
+    order.push('late-mutation');
+  }, 5).catch(error => {
+    order.push('timed-out');
+    throw error;
+  });
+  await waitFor(() => page.close.mock.calls.length === 1);
+
+  let handoffSettled = false;
+  const handoff = request(`/tabs/${tabId}/handoff`, {
+    method: 'POST', body: { userId: 'route-user', action: 'request' },
+  }).finally(() => { handoffSettled = true; });
+  await waitFor(() => __testing.tabLocks.get(tabId)?.queue?.length === 1);
+  expect(handoffSettled).toBe(false);
+
+  releaseMutation();
+  await expect(mutation).rejects.toMatchObject({ code: 'operation_timeout' });
+  await expect(handoff).resolves.toMatchObject({ status: 200, body: { handoff: { status: 'paused' } } });
+  expect(order).toEqual(['late-mutation', 'timed-out']);
+});
+
+test('legacy snapshot annotates interactive refs from child frames', async () => {
+  const tabId = 'legacy-iframe-tab';
+  const { session } = makeSemanticIframeSession(tabId);
+  __testing.sessions.set('iframe-user', session);
+
+  const snapshot = await request(`/tabs/${tabId}/snapshot?userId=iframe-user`);
+  expect(snapshot).toMatchObject({ status: 200, body: { refsCount: 2 } });
+  expect(snapshot.body.snapshot).toContain('- button "Continue" [e1]');
+  expect(snapshot.body.snapshot).toContain('- textbox "Password" [e2]');
+  expect(snapshot.body.snapshot).toContain('[frame-key=frame_');
+});
+
+test('tab, group, and session deletion remove their tab lock entries', async () => {
+  const single = makeSession('single-tab');
+  __testing.sessions.set('single-user', single.session);
+  await expect(request('/tabs/single-tab?userId=single-user', { method: 'DELETE' }))
+    .resolves.toMatchObject({ status: 200, body: { ok: true } });
+  expect(__testing.tabLocks.has('single-tab')).toBe(false);
+
+  const grouped = makeSession('group-tab-a');
+  const groupedSecond = makeSession('group-tab-b');
+  grouped.session.tabGroups.get('default').set('group-tab-b', groupedSecond.tabState);
+  __testing.sessions.set('group-user', grouped.session);
+  await expect(request('/tabs/group/default?userId=group-user', { method: 'DELETE' }))
+    .resolves.toMatchObject({ status: 200, body: { ok: true } });
+  expect(__testing.tabLocks.has('group-tab-a')).toBe(false);
+  expect(__testing.tabLocks.has('group-tab-b')).toBe(false);
+
+  const whole = makeSession('session-tab');
+  __testing.sessions.set('session-user', whole.session);
+  await expect(request('/sessions/session-user', { method: 'DELETE' }))
+    .resolves.toMatchObject({ status: 200, body: { ok: true } });
+  expect(__testing.tabLocks.has('session-tab')).toBe(false);
 });
 
 test('type_secret enforces the live iframe origin and rejects frame navigation and opaque frames', async () => {
