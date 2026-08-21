@@ -37,7 +37,7 @@ function fixture() {
 function dependencies(home, adapters = []) {
   return {
     home,
-    version: '0.1.0',
+    version: '0.1.1',
     platform: 'darwin',
     nodeVersion: 'v22.1.0',
     config: { serverEnv: {} },
@@ -48,7 +48,7 @@ function dependencies(home, adapters = []) {
   };
 }
 
-function memoryAdapter(home, id, { initial = null, generated = generatedMcpEntry(id, '0.1.0') } = {}) {
+function memoryAdapter(home, id, { initial = null, generated = generatedMcpEntry(id, '0.1.1') } = {}) {
   let current = structuredClone(initial);
   const adapter = {
     id,
@@ -72,14 +72,14 @@ function memoryAdapter(home, id, { initial = null, generated = generatedMcpEntry
 }
 
 function commandMemoryAdapter(home, id, { initial = null } = {}) {
-  const generated = generatedMcpEntry(id, '0.1.0');
+  const generated = generatedMcpEntry(id, '0.1.1');
   let current = structuredClone(initial);
   let interruptAfterRemove = false;
   const adapter = makeCommandAdapter({
     id,
     identity: id,
     executable: id,
-    version: '0.1.0',
+    version: '0.1.1',
     entry: generated,
     configPath: join(home, `${id}.json`),
     add: value => ['add', JSON.stringify(value)],
@@ -113,9 +113,9 @@ function interrupt() {
 }
 
 test('generated MCP entries use the public package identity and stable harness user', () => {
-  expect(generatedMcpEntry('codex', '0.1.0')).toEqual({
+  expect(generatedMcpEntry('codex', '0.1.1')).toEqual({
     command: 'npx',
-    args: ['-y', '@mechanica-labs/goliath@0.1.0', 'mcp'],
+    args: ['-y', '@mechanica-labs/goliath@0.1.1', 'mcp'],
     env: { GOLIATH_USER_ID: 'codex' },
   });
 });
@@ -165,7 +165,7 @@ test('live smoke completes before the first harness mutation', async () => {
   const result = await installHarnesses({ dependencies: deps });
   expect(result.status).toBe('ready');
   expect(order).toEqual(['smoke', 'apply', 'validate']);
-  expect(readHarnessState(harnessInstallPaths(home)).package).toEqual({ name: '@mechanica-labs/goliath', version: '0.1.0' });
+  expect(readHarnessState(harnessInstallPaths(home)).package).toEqual({ name: '@mechanica-labs/goliath', version: '0.1.1' });
   for (const directory of ['cookies', 'uploads', 'profiles', 'traces']) {
     expect(existsSync(join(home, '.goliath', directory))).toBe(false);
   }
@@ -236,7 +236,7 @@ test('all reviewed native adapters reject structurally drifted entries before re
 
   let codexCurrent;
   let codexRemovals = 0;
-  const codex = codexAdapter({ home, version: '0.1.0', runCommand: async (argv) => {
+  const codex = codexAdapter({ home, version: '0.1.1', runCommand: async (argv) => {
     if (argv.includes('get')) {
       return JSON.stringify({
         transport: { type: 'stdio', command: codexCurrent.command, args: codexCurrent.args, env: codexCurrent.env, cwd: codexCurrent.cwd },
@@ -253,20 +253,20 @@ test('all reviewed native adapters reject structurally drifted entries before re
   codexCurrent = { ...codexExpected, args: ['user-owned'] };
   cases.push({ adapter: codex, expected: codexExpected, removals: () => codexRemovals });
 
-  const claude = claudeCodeAdapter({ home, version: '0.1.0', runCommand: async () => '' });
+  const claude = claudeCodeAdapter({ home, version: '0.1.1', runCommand: async () => '' });
   mkdirSync(dirname(claude.configPath), { recursive: true });
   const claudeExpected = claude.generatedEntry();
   writeFileSync(claude.configPath, JSON.stringify({ mcpServers: { goliath: { ...claudeExpected, command: 'user-owned' } } }));
   cases.push({ adapter: claude, expected: claudeExpected });
 
-  const hermes = hermesAdapter({ home, version: '0.1.0' });
+  const hermes = hermesAdapter({ home, version: '0.1.1' });
   mkdirSync(dirname(hermes.configPath), { recursive: true });
   const hermesExpected = hermes.generatedEntry();
   writeFileSync(hermes.configPath, `mcp_servers:\n  goliath:\n    command: user-owned\n    args: []\n    env: {}\n`);
   cases.push({ adapter: hermes, expected: hermesExpected });
 
   let openClawRemovals = 0;
-  const openclaw = openClawAdapter({ home, version: '0.1.0', runCommand: async (argv) => {
+  const openclaw = openClawAdapter({ home, version: '0.1.1', runCommand: async (argv) => {
     if (argv.includes('inspect')) return JSON.stringify({ plugin: { id: 'goliath-browser', packageName: '@someone/else', version: '9.9.9' } });
     if (argv.includes('uninstall')) openClawRemovals += 1;
     return '';
@@ -282,16 +282,16 @@ test('all reviewed native adapters reject structurally drifted entries before re
 test('native command adapters use the corrected Claude argument order and OpenClaw plugin id', async () => {
   const home = fixture();
   let claudeCommand;
-  const claude = claudeCodeAdapter({ home, version: '0.1.0', runCommand: async (argv) => { claudeCommand = argv; } });
+  const claude = claudeCodeAdapter({ home, version: '0.1.1', runCommand: async (argv) => { claudeCommand = argv; } });
   await claude.apply();
   expect(claudeCommand).toEqual([
     'claude', 'mcp', 'add', '--transport', 'stdio', '--scope', 'user', 'goliath',
-    '-e', 'GOLIATH_USER_ID=claude-code', '--', 'npx', '-y', '@mechanica-labs/goliath@0.1.0', 'mcp',
+    '-e', 'GOLIATH_USER_ID=claude-code', '--', 'npx', '-y', '@mechanica-labs/goliath@0.1.1', 'mcp',
   ]);
 
   let installed = true;
   const commands = [];
-  const openclaw = openClawAdapter({ home, version: '0.1.0', runCommand: async (argv) => {
+  const openclaw = openClawAdapter({ home, version: '0.1.1', runCommand: async (argv) => {
     commands.push(argv);
     if (argv.includes('inspect')) {
       if (!installed) {
@@ -299,7 +299,7 @@ test('native command adapters use the corrected Claude argument order and OpenCl
         error.stderr = 'Plugin not found: goliath-browser';
         throw error;
       }
-      return JSON.stringify({ plugin: { id: 'goliath-browser', packageName: '@mechanica-labs/goliath', version: '0.1.0' } });
+      return JSON.stringify({ plugin: { id: 'goliath-browser', packageName: '@mechanica-labs/goliath', version: '0.1.1' } });
     }
     if (argv.includes('uninstall')) installed = false;
     return '';
@@ -314,7 +314,7 @@ test('entry-level uninstall restores only the replaced Goliath entry and preserv
   const configPath = join(home, '.cursor', 'mcp.json');
   const original = { command: 'original-server', args: ['--keep'], env: { ORIGINAL: '1' } };
   writeFileSync(configPath, `${JSON.stringify({ theme: 'dark', mcpServers: { goliath: original, other: { command: 'other' } } }, null, 2)}\n`);
-  const adapter = cursorAdapter({ home, version: '0.1.0' });
+  const adapter = cursorAdapter({ home, version: '0.1.1' });
   const deps = dependencies(home, [adapter]);
   expect((await installHarnesses({ options: { clients: ['cursor'], replaceExisting: true }, dependencies: deps })).status).toBe('ready');
 

@@ -19,7 +19,7 @@ function sourceFiles(dir) {
 }
 
 test('package uses the published Camoufox runtime and ships its CLIs', () => {
-  expect(manifest).toMatchObject({ name: '@mechanica-labs/goliath', version: '0.1.0', private: false });
+  expect(manifest).toMatchObject({ name: '@mechanica-labs/goliath', version: '0.1.1', private: false });
   expect(manifest.dependencies['camoufox-js']).toBeDefined();
   expect(manifest.dependencies['goliath-js']).toBeUndefined();
   const cli = resolve(root, manifest.bin.goliath);

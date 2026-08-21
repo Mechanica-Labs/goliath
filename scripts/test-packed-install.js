@@ -41,18 +41,18 @@ try {
   run('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund', '--prefix', prefix, tarball]);
   const packageRoot = join(prefix, 'node_modules', '@mechanica-labs', 'goliath');
   const manifest = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8'));
-  if (manifest.name !== '@mechanica-labs/goliath' || manifest.version !== '0.1.0' || manifest.private !== false) {
+  if (manifest.name !== '@mechanica-labs/goliath' || manifest.version !== '0.1.1' || manifest.private !== false) {
     throw new Error('packed package identity mismatch');
   }
   const versionOutput = run(process.execPath, [join(packageRoot, 'bin', 'goliath.js'), '--version']).trim();
-  if (versionOutput !== '0.1.0') throw new Error(`packed CLI reported ${versionOutput}`);
+  if (versionOutput !== '0.1.1') throw new Error(`packed CLI reported ${versionOutput}`);
 
   const { harnessConfigs } = await import(pathToFileURL(join(packageRoot, 'lib', 'cli.js')));
   const { installHarnesses, uninstallHarnesses } = await import(pathToFileURL(join(packageRoot, 'lib', 'install', 'orchestrator.js')));
   const { entriesEqual, generatedMcpEntry } = await import(pathToFileURL(join(packageRoot, 'lib', 'install', 'adapters', 'base.js')));
   const { TOOL_NAMES } = await import(pathToFileURL(join(packageRoot, 'mcp', 'tool-contracts.mjs')));
   const generic = harnessConfigs().json.mcpServers.goliath;
-  if (!generic.args.includes('@mechanica-labs/goliath@0.1.0')) throw new Error('packed harness config has the wrong npm identity');
+  if (!generic.args.includes('@mechanica-labs/goliath@0.1.1')) throw new Error('packed harness config has the wrong npm identity');
   const declaredToolNames = manifest.openclaw.tools.map(tool => tool.name).sort();
   const contractToolNames = [...TOOL_NAMES].sort();
   if (

@@ -2,7 +2,7 @@
   "id": "goliath-browser",
   "name": "Goliath",
   "description": "Firefox-based browser automation for AI agents with configurable anti-detection measures",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "envVars": {
     "GOLIATH_API_KEY": {
       "description": "Secret key for the cookie-import endpoint. Cookie import is disabled when unset. Only set this if you need to import browser cookies and the server is local or access-controlled.",

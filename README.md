@@ -15,8 +15,8 @@ Goliath is built first for Hermes: it prints ready-to-paste `config.yaml`, keeps
 Requirement: Node.js 22+. The one-time setup downloads about 300 MB for the browser engine.
 
 ```bash
-npx -y @mechanica-labs/goliath@0.1.0 install
-npx -y @mechanica-labs/goliath@0.1.0 doctor
+npx -y @mechanica-labs/goliath@0.1.1 install
+npx -y @mechanica-labs/goliath@0.1.1 doctor
 ```
 
 If you already have a compatible Camoufox executable, set `GOLIATH_EXECUTABLE=/absolute/path/to/camoufox` instead of running `npx camoufox-js fetch`.
@@ -31,7 +31,7 @@ Use `goliath setup` when you only want ready-to-paste Hermes YAML plus JSON for 
 mcp_servers:
   goliath:
     command: "npx"
-    args: ["-y", "@mechanica-labs/goliath@0.1.0", "mcp"]
+    args: ["-y", "@mechanica-labs/goliath@0.1.1", "mcp"]
     env:
       GOLIATH_USER_ID: "personal-assistant"
 ```

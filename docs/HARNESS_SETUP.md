@@ -20,7 +20,7 @@ Add this under the top level of Hermes `config.yaml`:
 mcp_servers:
   goliath:
     command: "npx"
-    args: ["-y", "@mechanica-labs/goliath@0.1.0", "mcp"]
+    args: ["-y", "@mechanica-labs/goliath@0.1.1", "mcp"]
     env:
       GOLIATH_USER_ID: "personal-assistant"
 ```
@@ -36,7 +36,7 @@ Claude, Codex, Cursor, and other clients that accept `mcpServers` can use the sa
   "mcpServers": {
     "goliath": {
       "command": "npx",
-      "args": ["-y", "@mechanica-labs/goliath@0.1.0", "mcp"],
+      "args": ["-y", "@mechanica-labs/goliath@0.1.1", "mcp"],
       "env": {
         "GOLIATH_USER_ID": "personal-assistant"
       }
