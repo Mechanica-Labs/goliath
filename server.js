@@ -3464,7 +3464,10 @@ app.post('/tabs/:tabId/actions/plan', express.json({ limit: '256kb' }), async (r
  *               userId: { type: string }
  *               contractId: { type: string }
  *               confirm: { type: boolean }
- *               postconditions: { type: array, items: { type: object } }
+ *               postconditions:
+ *                 type: array
+ *                 description: URL conditions use bounded literal matching with optional ^ and $ anchors; regular expressions are not evaluated.
+ *                 items: { type: object }
  *     responses:
  *       200: { description: Execution and verification result. }
  *       409: { description: Contract stale, blocked, or awaiting confirmation. }

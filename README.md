@@ -131,7 +131,7 @@ curl -sS -X POST http://127.0.0.1:9377/tabs/TAB_ID/actions/execute \
   -d '{"userId":"agent1","contractId":"CONTRACT_ID","confirm":true,"postconditions":[{"kind":"url_matches","pattern":"/next$"}]}'
 ```
 
-Successful legacy mutations invalidate outstanding semantic contracts. Use `GET /tabs/:tabId/events?userId=agent1` for observation events and `GET /tabs/:tabId/workflow?userId=agent1` for successful semantic steps as a replayable role/name workflow.
+Successful legacy mutations invalidate outstanding semantic contracts. URL postconditions use bounded literal matching with optional leading `^` and trailing `$` anchors; arbitrary regular expressions are not evaluated. Use `GET /tabs/:tabId/events?userId=agent1` for observation events and `GET /tabs/:tabId/workflow?userId=agent1` for successful semantic steps as a replayable role/name workflow.
 
 Semantic extraction binds JSON Schema properties to `x-node-id` values and returns per-field evidence, confidence, and unresolved fields. `deterministic_then_model` currently reports unresolved fields with `modelUsage: null`; it never silently sends page content to a model.
 

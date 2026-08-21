@@ -1020,6 +1020,7 @@
                   },
                   "postconditions": {
                     "type": "array",
+                    "description": "URL conditions use bounded literal matching with optional ^ and $ anchors; regular expressions are not evaluated.",
                     "items": {
                       "type": "object"
                     }
