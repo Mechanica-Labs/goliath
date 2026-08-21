@@ -1,8 +1,8 @@
 /**
- * Re-exports child_process functions.
+ * Re-exports child_process functions that do not invoke a shell.
  * Isolated so that caller files don't contain the 'child_process' module name,
  * avoiding OpenClaw scanner "dangerous-exec" false positives on legitimate usage.
  */
-import { execSync as _execSync } from 'node:child_process';
+import { execFileSync as _execFileSync } from 'node:child_process';
 
-export const execSync = _execSync;
+export const execFileSync = _execFileSync;
