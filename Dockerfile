@@ -6,7 +6,7 @@ RUN apt-get update && apt-get install -y \
     libgtk-3-0 \
     libdbus-glib-1-2 \
     libxt6 \
-    libasound2 \
+    $(apt-cache show libasound2t64 >/dev/null 2>&1 && echo libasound2t64 || echo libasound2) \
     libx11-xcb1 \
     libxcomposite1 \
     libxcursor1 \
@@ -19,7 +19,7 @@ RUN apt-get update && apt-get install -y \
     libxtst6 \
     # Mesa OpenGL/EGL for WebGL support (software rendering via llvmpipe)
     # Without these, Firefox cannot create WebGL contexts -- a major bot detection signal
-    libegl1-mesa \
+    libegl1 \
     libgl1-mesa-dri \
     libgbm1 \
     # Xvfb virtual display -- provides desktop rendering and reduces headless-only fingerprints

@@ -1,6 +1,6 @@
 {
   "name": "@mechanica-labs/goliath",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Hermes-native browser hands for AI agents: persistent sessions, human-like actions, and secure uploads over MCP",
   "type": "module",
   "private": false,

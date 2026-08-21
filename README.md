@@ -15,13 +15,15 @@ Goliath is built first for Hermes: it prints ready-to-paste `config.yaml`, keeps
 Requirement: Node.js 22+. The one-time setup downloads about 300 MB for the browser engine.
 
 ```bash
-npx -y @mechanica-labs/goliath@0.1.0 install
-npx -y @mechanica-labs/goliath@0.1.0 doctor
+npx -y @mechanica-labs/goliath@0.1.1 install
+npx -y @mechanica-labs/goliath@0.1.1 doctor
 ```
 
 If you already have a compatible Camoufox executable, set `GOLIATH_EXECUTABLE=/absolute/path/to/camoufox` instead of running `npx camoufox-js fetch`.
 
 `goliath install` downloads and verifies Camoufox, proves the public MCP/browser/Hands path against Example Domain, and safely configures detected Codex, Claude Code, Cursor, Hermes, and OpenClaw installations. It records the exact original and managed Goliath entries for entry-level rollback and uninstall, refuses to overwrite unmanaged entries unless a specific restorable client is named with `--replace-existing`, and can be previewed with `--dry-run`.
+
+On Debian/Ubuntu, `goliath install` installs the GTK, X11, Mesa, font, and Xvfb packages required by the browser when it is run as root or with passwordless sudo. Without those packages, `goliath doctor` reports the missing shared libraries instead of declaring the runtime ready. In Docker or other locked-down containers, the browser may also need a compatible sandbox/security profile.
 
 Use `goliath setup` when you only want ready-to-paste Hermes YAML plus JSON for another MCP client. The generated Hermes command is pinned and self-contained:
 
@@ -29,7 +31,7 @@ Use `goliath setup` when you only want ready-to-paste Hermes YAML plus JSON for 
 mcp_servers:
   goliath:
     command: "npx"
-    args: ["-y", "@mechanica-labs/goliath@0.1.0", "mcp"]
+    args: ["-y", "@mechanica-labs/goliath@0.1.1", "mcp"]
     env:
       GOLIATH_USER_ID: "personal-assistant"
 ```
@@ -186,6 +188,8 @@ Crash and hang reporting is disabled by default and has no built-in destination.
 ## Browser runtime
 
 The product and API are named Goliath; the browser runtime is provided by the public `camoufox-js` package. Goliath stages a complete download before replacing an existing runtime, so an interrupted download leaves the previous working installation intact. Run `goliath doctor` to inspect the installation, or supply an existing compatible executable with `GOLIATH_EXECUTABLE`. `CAMOUFOX_EXECUTABLE`, `CAMOUFOX_EXECUTABLE_PATH`, and `CAMOFOX_EXECUTABLE_PATH` remain compatibility aliases.
+
+The runtime is staged to a temporary file before an existing install is replaced, so a failed or interrupted download leaves the previous working runtime in place. Run `goliath doctor` to check what is installed, verify Linux shared libraries, and confirm that the browser can launch.
 
 Terminal output is animated and colorized when interactive, and switches to plain single-line output when piped or running in CI. Set `NO_COLOR=1` to disable color or `GOLIATH_ASCII=1` to replace box-drawing characters.
 

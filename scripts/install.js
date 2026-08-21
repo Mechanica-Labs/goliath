@@ -22,12 +22,16 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import tui, { formatBytes } from '../lib/tui.js';
 import {
+  LINUX_BROWSER_APT_PACKAGE_CANDIDATES,
+  LINUX_BROWSER_APT_PACKAGES,
   cacheDir,
   externalExecutableFromEnv,
   freeDiskBytes,
+  inspectLinuxRuntimeDependencies,
   inspectInstall,
   installBrowser,
   installedSize,
+  verifyBrowserLaunch,
 } from '../lib/browser-install.js';
 import { resolvePort } from '../lib/service.js';
 
@@ -65,6 +69,10 @@ function showHelp() {
 function humanBytes(bytes) {
   if (!Number.isFinite(bytes)) return 'unknown';
   return `${(bytes / 1e9).toFixed(1)} GB`;
+}
+
+function aptCommand(packages = LINUX_BROWSER_APT_PACKAGES) {
+  return `apt-get update && apt-get install -y ${packages.join(' ')}`;
 }
 
 /** Node version, architecture support, and disk headroom. Throws on a hard stop. */
@@ -119,6 +127,97 @@ async function ensureDependencies({ skipDeps }) {
     throw new Error('dependency installation failed');
   }
   spinner.succeed('Dependencies installed');
+}
+
+async function canRunSudo(run) {
+  const result = run('sudo', ['-n', 'true'], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  return result.status === 0;
+}
+
+function packageExists(run, useSudo, name) {
+  const result = run(useSudo ? 'sudo' : 'apt-cache', useSudo ? ['apt-cache', 'show', name] : ['show', name], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, DEBIAN_FRONTEND: 'noninteractive' },
+  });
+  return result.status === 0;
+}
+
+function resolveLinuxSystemPackages(run, useSudo) {
+  return LINUX_BROWSER_APT_PACKAGE_CANDIDATES.map((candidates) => (
+    candidates.find((name) => packageExists(run, useSudo, name)) || candidates[0]
+  ));
+}
+
+async function ensureLinuxSystemPackages({ skipBrowser }) {
+  if (skipBrowser || platform() !== 'linux') {
+    if (platform() !== 'linux') tui.note('Skipped (not Linux).');
+    else tui.note('Skipped (--skip-browser).');
+    return;
+  }
+
+  const external = externalExecutableFromEnv();
+  if (external) {
+    tui.note(`Using external runtime from ${external.name}; system package checks are launch-verified later.`);
+    return;
+  }
+
+  // Install proactively on Debian/Ubuntu. The runtime may not exist yet on a
+  // first install, but these are the same packages required by the Docker image.
+  if (!existsSync('/usr/bin/apt-get')) {
+    tui.warn('Cannot auto-install browser system packages: apt-get was not found.');
+    tui.note('Install GTK/X11/Mesa/font packages for Firefox/Camoufox, then re-run this command.');
+    return;
+  }
+
+  const { spawnSync: run } = await import('node:child_process');
+  const useSudo = typeof process.getuid === 'function' && process.getuid() !== 0;
+  const command = useSudo ? 'sudo' : 'apt-get';
+
+  if (useSudo && !(await canRunSudo(run))) {
+    tui.warn('Cannot auto-install browser system packages without passwordless sudo.');
+    tui.note(`Run: sudo ${aptCommand()}`);
+    return;
+  }
+
+  const packages = resolveLinuxSystemPackages(run, useSudo);
+
+  const spinner = tui.spinner('Installing Linux browser system packages...');
+  const result = run(command, useSudo ? ['apt-get', 'update'] : ['update'], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, DEBIAN_FRONTEND: 'noninteractive' },
+  });
+  if (result.status !== 0) {
+    spinner.fail('apt-get update failed');
+    const output = `${result.stdout || ''}${result.stderr || ''}`.trim();
+    if (output) tui.line(tui.style.gray(output.split('\n').slice(-12).join('\n')));
+    tui.note(`Run manually: ${useSudo ? 'sudo ' : ''}${aptCommand(packages)}`);
+    throw new Error('Linux browser system package update failed');
+  }
+
+  const install = run(command, [
+    ...(useSudo ? ['apt-get'] : []),
+    'install',
+    '-y',
+    ...packages,
+  ], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, DEBIAN_FRONTEND: 'noninteractive' },
+  });
+  if (install.status !== 0) {
+    spinner.fail('Linux browser system package install failed');
+    const output = `${install.stdout || ''}${install.stderr || ''}`.trim();
+    if (output) tui.line(tui.style.gray(output.split('\n').slice(-12).join('\n')));
+    tui.note(`Run manually: ${useSudo ? 'sudo ' : ''}${aptCommand(packages)}`);
+    throw new Error('Linux browser system package installation failed');
+  }
+
+  spinner.succeed('Linux browser system packages installed');
 }
 
 /** Download the browser runtime, rendering a live progress bar. */
@@ -208,6 +307,36 @@ function report() {
   return true;
 }
 
+async function verifyRuntimeReady() {
+  const status = inspectInstall();
+  if (!status.installed) return false;
+
+  if (platform() === 'linux' && status.kind !== 'external') {
+    const deps = await inspectLinuxRuntimeDependencies();
+    if (!deps.ok) {
+      tui.fail('Linux browser system dependencies are missing');
+      for (const issue of deps.issues) tui.note(issue);
+      tui.note(`Install them with: ${aptCommand()}`);
+      return false;
+    }
+    tui.ok('Linux browser system dependencies verified');
+  }
+
+  const spinner = tui.spinner('Launching browser runtime...');
+  const launch = await verifyBrowserLaunch();
+  if (!launch.ok) {
+    spinner.fail('Browser runtime launch failed');
+    tui.note(launch.error);
+    if (platform() === 'linux') {
+      tui.note(`Install/repair system packages with: ${aptCommand()}`);
+      tui.note('In Docker, also ensure the container permits browser sandboxing or run with a compatible security profile.');
+    }
+    return false;
+  }
+  spinner.succeed('Browser runtime launched');
+  return true;
+}
+
 function nextSteps() {
   const port = resolvePort(process.env);
   tui.line();
@@ -232,7 +361,7 @@ export async function main(argv = process.argv.slice(2)) {
 
   if (options.check) {
     tui.banner('Installation check');
-    const usable = report();
+    const usable = report() && await verifyRuntimeReady();
     return usable ? 0 : 1;
   }
 
@@ -244,18 +373,22 @@ export async function main(argv = process.argv.slice(2)) {
   process.on('SIGINT', () => { restore(); process.exit(130); });
 
   try {
-    const total = 4;
+    const total = 5;
     tui.step(1, total, 'Checking environment');
     preflight();
 
-    tui.step(2, total, 'Installing dependencies');
+    tui.step(2, total, 'Installing system packages');
+    await ensureLinuxSystemPackages(options);
+
+    tui.step(3, total, 'Installing dependencies');
     await ensureDependencies(options);
 
-    tui.step(3, total, 'Installing browser runtime');
+    tui.step(4, total, 'Installing browser runtime');
     await ensureBrowser(options);
 
-    tui.step(4, total, 'Verifying');
+    tui.step(5, total, 'Verifying');
     if (!report()) return 1;
+    if (!await verifyRuntimeReady()) return 1;
 
     tui.line();
     tui.line(`  ${tui.style.green(tui.sym.ok)} ${tui.style.bold('Goliath is ready')} ${tui.style.gray(`in ${Math.round((Date.now() - startedAt) / 1000)}s`)}`);
