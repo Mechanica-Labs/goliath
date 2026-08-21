@@ -297,7 +297,7 @@
           "gatedBy": "trace: true flag on tab creation (opt-in per session, off by default)"
         },
         {
-          "path": "~/.goliath/checkpoints/<hashed-userId>/",
+          "path": "~/.goliath/checkpoints/checkpoint-<uuid>.json",
           "purpose": "Storage-state checkpoints for explicit isolated session forks",
           "gatedBy": "POST /sessions/:userId/checkpoints (explicit per checkpoint)"
         }
