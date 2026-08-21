@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, extname, resolve } from 'node:path';
 import { createRequire } from 'node:module';
@@ -13,11 +14,12 @@ function sourceFiles(dir) {
     if (entry.name === 'node_modules' || entry.name.startsWith('.')) return [];
     const path = resolve(dir, entry.name);
     if (entry.isDirectory()) return sourceFiles(path);
-    return ['.js', '.ts'].includes(extname(entry.name)) ? [path] : [];
+    return ['.js', '.mjs', '.ts'].includes(extname(entry.name)) ? [path] : [];
   });
 }
 
 test('package uses the published Camoufox runtime and ships its CLIs', () => {
+  expect(manifest).toMatchObject({ name: '@mechanica-labs/goliath', version: '0.1.0', private: false });
   expect(manifest.dependencies['camoufox-js']).toBeDefined();
   expect(manifest.dependencies['goliath-js']).toBeUndefined();
   const cli = resolve(root, manifest.bin.goliath);
@@ -31,6 +33,47 @@ test('package uses the published Camoufox runtime and ships its CLIs', () => {
   expect(manifest.contentPolicy).toEqual({ class: 'dual-use' });
   expect(existsSync(resolve(root, 'DISCLOSURE'))).toBe(true);
   expect(manifest.files).toContain('DISCLOSURE');
+  expect(manifest.scripts['test:packed-install']).toBe('node scripts/test-packed-install.js');
+});
+
+test('source contains no obsolete package identity or release version', () => {
+  const stale = [];
+  const obsoletePackage = ['@mechanica', 'goliath'].join('/');
+  const walk = (directory) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (entry.name === 'node_modules' || entry.name === '.git' || entry.name.startsWith('.context')) continue;
+      const path = resolve(directory, entry.name);
+      if (entry.isDirectory()) {
+        walk(path);
+        continue;
+      }
+      const contents = readFileSync(path);
+      if (contents.includes(0)) continue;
+      const text = contents.toString('utf8');
+      if (text.includes(obsoletePackage) || /(^|[^0-9])1\.(?:11|5)\.2([^0-9]|$)/.test(text)) {
+        stale.push(path.slice(root.length + 1));
+      }
+    }
+  };
+  walk(root);
+  expect(stale).toEqual([]);
+});
+
+test('npm tarball excludes tests, docs, credentials, dependencies, and browser binaries', () => {
+  const packed = JSON.parse(execFileSync('npm', ['pack', '--dry-run', '--json'], { cwd: root, encoding: 'utf8' }))[0];
+  const paths = packed.files.map((file) => file.path);
+  const forbidden = paths.filter((path) => (
+    path.startsWith('tests/') ||
+    path.startsWith('docs/') ||
+    path.startsWith('.github/') ||
+    path.includes('node_modules/') ||
+    /(^|\/)\.env(?:\.|$)/.test(path) ||
+    /(^|\/)(?:test-[^/]+|[^/]+\.(?:test|spec)\.[cm]?[jt]s)$/.test(path) ||
+    /\.(?:tgz|zip|dmg|exe)$/.test(path) ||
+    /(^|\/)camoufox-bin$/.test(path)
+  ));
+  expect(forbidden).toEqual([]);
+  expect(paths.filter((path) => /(^|\/)(?:README|AGENTS)(?:\.[^/]*)?$/i.test(path))).toEqual(['README.md']);
 });
 
 test('Camoufox uses the MIT-licensed compatible UA parser release', () => {
