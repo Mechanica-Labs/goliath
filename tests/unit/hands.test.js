@@ -1,5 +1,5 @@
 import { test, expect } from '@jest/globals';
-import { coerceHandsSteps, HandsError, MAX_STEPS } from '../../lib/hands.js';
+import { coerceHandsSteps, computeHandBudgetMs, HandsError, MAX_STEPS } from '../../lib/hands.js';
 
 test('rejects non-array or empty steps', () => {
   expect(() => coerceHandsSteps(undefined)).toThrow(HandsError);
@@ -35,10 +35,8 @@ test('select requires a value (or values)', () => {
 });
 
 test('wait normalizes and clamps ms', () => {
-  const [step] = coerceHandsSteps([{ action: 'wait' }]);
-  expect(step.ms).toBe(300);
-  const [big] = coerceHandsSteps([{ action: 'wait', ms: 999999 }]);
-  expect(big.ms).toBe(5000);
+  expect(coerceHandsSteps([{ action: 'wait' }])[0].ms).toBe(300);
+  expect(coerceHandsSteps([{ action: 'wait', ms: 999999 }])[0].ms).toBe(5000);
 });
 
 test('press requires a key', () => {
@@ -58,4 +56,15 @@ test('carries stepIndex on validation errors', () => {
     expect(err).toBeInstanceOf(HandsError);
     expect(err.stepIndex).toBe(1);
   }
+});
+
+test('humanized hand budgets scale by profile and step count', () => {
+  expect(computeHandBudgetMs({ profile: 'fast', stepCount: 4, humanizedEnabled: true, handlerTimeoutMs: 30000 })).toBe(20000);
+  expect(computeHandBudgetMs({ profile: 'balanced', stepCount: 4, humanizedEnabled: true, handlerTimeoutMs: 30000 })).toBe(48000);
+  expect(computeHandBudgetMs({ profile: 'deliberate', stepCount: 4, humanizedEnabled: true, handlerTimeoutMs: 30000 })).toBe(60000);
+});
+
+test('hand budgets retain the fast default and cap humanized work', () => {
+  expect(computeHandBudgetMs({ profile: 'deliberate', stepCount: 20, humanizedEnabled: false, handlerTimeoutMs: 30000 })).toBe(30000);
+  expect(computeHandBudgetMs({ profile: 'deliberate', stepCount: 20, humanizedEnabled: true, handlerTimeoutMs: 30000 })).toBe(120000);
 });

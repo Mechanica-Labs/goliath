@@ -45,7 +45,7 @@ import { mountDocs } from './lib/openapi.js';
 import { initSentry, captureException as sentryCaptureException, setupExpressErrorHandler as setupSentryErrorHandler, flush as sentryFlush } from './lib/sentry.js';
 import { prepareExternalCamoufoxExecutable } from './lib/camoufox-executable.js';
 import { humanizedClick, humanizedOptions, humanizedScroll, humanizedType } from './lib/humanized-input.js';
-import { coerceHandsSteps, HandsError } from './lib/hands.js';
+import { coerceHandsSteps, HandsError, computeHandBudgetMs } from './lib/hands.js';
 import { behaviorReport, createBehaviorTracker, recordBehaviorEvent } from './lib/behavior.js';
 import { applyFingerprintCoherence } from './lib/fingerprint.js';
 import tui from './lib/tui.js';
@@ -4757,15 +4757,31 @@ app.post('/tabs/:tabId/hands', async (req, res) => {
     const results = [];
     let abortedAt = null;
 
-    // Inherit the standard lock timeout (do NOT pass a custom 3rd arg — that
-    // would let one hand hold the tab lock past TAB_LOCK_TIMEOUT_MS). Instead,
-    // enforce a self-terminating deadline inside the loop so a long step list
-    // stops cleanly within the normal route budget.
+    // Budget scaling for hands. Humanized interaction is deliberately slow — a
+    // single humanized click on a live browser traverses a real pointer path +
+    // scroll-into-view + hesitation, and the observed cost is ~7-12s per click
+    // when elements are spread across the page (grid forms). A multi-click
+    // humanized hand therefore legitimately needs well beyond the flat
+    // HANDLER_TIMEOUT_MS. Size the budget by step count × profile and, for
+    // humanized hands, do NOT clamp to the tab-lock window — the per-step
+    // handDeadline below already self-terminates cleanly so no hung step can
+    // hold the lock indefinitely; we only bound the worst case with a generous
+    // per-hand ceiling. Non-humanized (fast) hands keep the tight default.
+    // The math lives in lib/hands.js computeHandBudgetMs() so it's unit-testable.
+    const profile = inputConfig.enabled ? inputConfig.profile : 'fast';
+    const handBudgetMs = computeHandBudgetMs({
+      profile,
+      stepCount: steps.length,
+      humanizedEnabled: inputConfig.enabled,
+      handlerTimeoutMs: HANDLER_TIMEOUT_MS,
+    });
+    // Use the mutation-aware lock so a queued handoff request is ordered before
+    // the hand and rechecked immediately before the first step executes.
     const result = await withUserLimit(userId, () => withTabMutationLock(tabId, tabState, async () => {
       // Computed inside the lock so time spent waiting in the user concurrency
-      // queue does not eat the budget. Kept below HANDLER_TIMEOUT_MS so the
+      // queue does not eat the budget. Kept below handBudgetMs so the
       // standard withTimeout() wins cleanly for any single hung step.
-      const handDeadline = Date.now() + Math.max(1000, HANDLER_TIMEOUT_MS - 2000);
+      const handDeadline = Date.now() + Math.max(1000, handBudgetMs - 2000);
       for (let i = 0; i < steps.length; i++) {
         if (Date.now() > handDeadline) {
           results.push({ index: i, action: '__timeout__', ok: false, error: 'hand budget exceeded; split into smaller hands' });
@@ -4788,7 +4804,7 @@ app.post('/tabs/:tabId/hands', async (req, res) => {
         }
       }
       return { ok: abortedAt === null, completed: results.filter(r => r.ok).length, total: steps.length, url: tabState.page.url() };
-    }));
+    }, handBudgetMs));
 
     result.results = results;
     if (abortedAt !== null) result.failedStep = abortedAt;
