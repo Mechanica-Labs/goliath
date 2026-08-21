@@ -49,6 +49,7 @@ try {
 
   const { harnessConfigs } = await import(pathToFileURL(join(packageRoot, 'lib', 'cli.js')));
   const { installHarnesses, uninstallHarnesses } = await import(pathToFileURL(join(packageRoot, 'lib', 'install', 'orchestrator.js')));
+  const { entriesEqual, generatedMcpEntry } = await import(pathToFileURL(join(packageRoot, 'lib', 'install', 'adapters', 'base.js')));
   const { TOOL_NAMES } = await import(pathToFileURL(join(packageRoot, 'mcp', 'tool-contracts.mjs')));
   const generic = harnessConfigs().json.mcpServers.goliath;
   if (!generic.args.includes('@mechanica-labs/goliath@0.1.0')) throw new Error('packed harness config has the wrong npm identity');
@@ -59,16 +60,29 @@ try {
   const ids = ['codex', 'claude-code', 'cursor', 'hermes', 'openclaw'];
   const adapters = ids.map((id) => {
     const configPath = join(home, `${id}.json`);
+    const generated = generatedMcpEntry(id, manifest.version);
+    let current = null;
     return {
       id,
       identity: id,
       configPath,
       executable: id,
-      async apply() { writeFileSync(configPath, JSON.stringify({ goliath: true })); },
-      async validate() {
-        if (!existsSync(configPath)) throw new Error(`${id} config missing`);
+      generatedEntry: () => structuredClone(generated),
+      currentEntry: async () => structuredClone(current),
+      supportsReplacement: () => true,
+      async apply(value = generated) {
+        current = structuredClone(value);
+        writeFileSync(configPath, JSON.stringify({ goliath: current }));
       },
-      async remove() { rmSync(configPath, { force: true }); },
+      async validate(expected = generated) {
+        if (!entriesEqual(current, expected) || !existsSync(configPath)) throw new Error(`${id} config mismatch`);
+      },
+      async reconcile(expected, replacement = null) {
+        if (!entriesEqual(current, expected)) throw new Error(`${id} config drift`);
+        current = structuredClone(replacement);
+        if (replacement == null) rmSync(configPath, { force: true });
+        else writeFileSync(configPath, JSON.stringify({ goliath: current }));
+      },
     };
   });
   const config = {

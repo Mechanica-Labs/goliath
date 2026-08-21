@@ -21,7 +21,7 @@ npx -y @mechanica-labs/goliath@0.1.0 doctor
 
 If you already have a compatible Camoufox executable, set `GOLIATH_EXECUTABLE=/absolute/path/to/camoufox` instead of running `npx camoufox-js fetch`.
 
-`goliath install` downloads and verifies Camoufox, proves the public MCP/browser/Hands path against Example Domain, and safely configures detected Codex, Claude Code, Cursor, Hermes, and OpenClaw installations. It backs up changed harness configuration, refuses to overwrite unmanaged Goliath entries unless a specific client is named with `--replace-existing`, and can be previewed with `--dry-run`.
+`goliath install` downloads and verifies Camoufox, proves the public MCP/browser/Hands path against Example Domain, and safely configures detected Codex, Claude Code, Cursor, Hermes, and OpenClaw installations. It records the exact original and managed Goliath entries for entry-level rollback and uninstall, refuses to overwrite unmanaged entries unless a specific restorable client is named with `--replace-existing`, and can be previewed with `--dry-run`.
 
 Use `goliath setup` when you only want ready-to-paste Hermes YAML plus JSON for another MCP client. The generated Hermes command is pinned and self-contained:
 
