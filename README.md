@@ -226,11 +226,14 @@ npm run build
 npm run generate-openapi
 npm test
 npm run benchmark:behavior
+npm run benchmark
 ```
 
 After changing a REST route, update its `@openapi` block and regenerate `openapi.json`. See [AGENTS.md](AGENTS.md) for the route and plugin contribution rules.
 
 The behavior benchmark runs 26 local synthetic gates across semantic, spatial, timing, grid, multi-step, unfamiliar-schema, typing, and scrolling cases. It uses deterministic gate solvers to measure the interaction layer, so its pass rate does not measure autonomous reasoning or real CAPTCHA acceptance. TLS/JA3 and IP reputation also require separate external validation.
+
+`npm run benchmark` is the complementary core execution suite: it drives a running Goliath server through its public REST API against localhost fixtures and reports correctness, end-to-end latency (p50/p95), and API-call cost per primitive (tab creation, snapshot refs, ref clicks, Hands forms, navigation, multi-tab, session-state continuity, dynamic controls). It needs a working browser runtime, so it is opt-in rather than part of `npm test`. See [benchmarks/README.md](benchmarks/README.md).
 
 ## Licensing
 
