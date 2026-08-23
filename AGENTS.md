@@ -191,6 +191,14 @@ npm test                          # Unit, package-integrity, and OpenAPI tests
 npx jest tests/unit/openapi.test.js
 ```
 
+## npm Releases
+
+- The npm package source of truth is the public repo remote `https://github.com/Mechanica-Labs/goliath.git`, normally available locally as the `public` git remote. Do not publish from the private archive workspace path or from the wrong browser/login flow.
+- For each npm release, first land the package/version changes on public `main`, create or update the public GitHub release tag, and run `.github/workflows/publish.yml` from `Mechanica-Labs/goliath`.
+- Preferred publishing is npm trusted publishing through GitHub Actions. The npm trusted publisher must match: owner `Mechanica-Labs`, repo `goliath`, workflow `publish.yml`, with no environment unless the workflow adds one.
+- If trusted publishing is not configured and the release must ship immediately, use an explicit local fallback script under `.context/` that publishes from a detached worktree of `public/main`, runs the full release gate, dry-runs `npm pack`, asks for terminal confirmation, prompts for the npm OTP, publishes with `npm publish --access public --tag latest --otp=...`, and verifies `npm view` afterward.
+- Never guess between local npm auth, private archive workflows, and public repo workflows. Check git history and `git remote -v` first, then state the chosen path before publishing.
+
 ## Docker
 
 ```bash

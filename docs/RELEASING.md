@@ -5,10 +5,15 @@ The primary installer is npm because Goliath already requires Node.js, while `go
 ## One-time npm setup
 
 1. Confirm the release owner can publish `@mechanica-labs/goliath`.
-2. Add an npm automation token as the `NPM_TOKEN` GitHub Actions secret.
+2. Configure npm trusted publishing for GitHub Actions:
+   - package: `@mechanica-labs/goliath`
+   - repository: `Mechanica-Labs/goliath`
+   - workflow file: `publish.yml`
+   - permission: publish
+   - environment: blank, unless the workflow is later changed to use one
 3. Keep GitHub environment protection or required reviewers on release creation if the repository policy requires it.
 
-The workflow authenticates with `NPM_TOKEN` and publishes with npm provenance. Goliath declares npm's dual-use metadata because browser fingerprint controls and page evaluation can resemble security tooling.
+The workflow authenticates through npm trusted publishing and publishes with npm provenance. Do not commit npm tokens, `.npmrc`, auth URLs, trusted-publisher record IDs, or account access records to this repo. Goliath declares npm's dual-use metadata because browser fingerprint controls and page evaluation can resemble security tooling.
 
 ## Release
 
@@ -17,7 +22,7 @@ npm version patch
 git push --follow-tags
 ```
 
-Create and publish the matching GitHub Release, or run the publish workflow manually. The workflow installs dependencies, then `prepublishOnly` runs the build, OpenAPI generation, and complete test suite before npm uploads a provenance-attested public package.
+Create and publish the matching GitHub Release, or run the publish workflow manually from the public `Mechanica-Labs/goliath` repository. The workflow installs dependencies, then `prepublishOnly` runs the build, OpenAPI generation, and complete test suite before npm uploads a provenance-attested public package.
 
 Verify the user path from a clean shell:
 
