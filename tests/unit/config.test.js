@@ -92,3 +92,18 @@ test('workspace directory can be overridden', () => {
     process.env = before;
   }
 });
+
+test('dangerous-action brake defaults to confirm and honours GOLIATH_DANGEROUS_ACTIONS', () => {
+  const before = { ...process.env };
+  try {
+    delete process.env.GOLIATH_DANGEROUS_ACTIONS;
+    expect(loadConfig().dangerousActionsMode).toBe('confirm');
+    process.env.GOLIATH_DANGEROUS_ACTIONS = 'annotate';
+    expect(loadConfig().dangerousActionsMode).toBe('annotate');
+    process.env.GOLIATH_DANGEROUS_ACTIONS = 'off';
+    expect(loadConfig().dangerousActionsMode).toBe('off');
+    expect(loadConfig().serverEnv.GOLIATH_DANGEROUS_ACTIONS).toBe('off');
+  } finally {
+    process.env = before;
+  }
+});

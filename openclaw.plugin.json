@@ -14,6 +14,11 @@
       "required": false,
       "sensitive": true
     },
+    "GOLIATH_DANGEROUS_ACTIONS": {
+      "description": "Dangerous-action brake for click/type/hands/press: confirm (default) refuses send/pay/publish/delete/sign/confirm/transfer controls until the agent retries with confirm:true after a refusal; annotate acts but labels the response; off disables.",
+      "required": false,
+      "sensitive": false
+    },
     "GOLIATH_BIND_HOST": {
       "description": "Network interface to bind. Defaults to 127.0.0.1; use 0.0.0.0 only with GOLIATH_ACCESS_KEY.",
       "required": false,

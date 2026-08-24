@@ -346,6 +346,7 @@ export default function register(api) {
                 ref: { type: "string", description: "Element ref from snapshot (e.g., e1)" },
                 selector: { type: "string", description: "CSS selector (alternative to ref)" },
                 humanized: { type: "boolean", description: "Use curved pointer motion, hesitation, and variable click timing" },
+                confirm: { type: "boolean", description: "Set true only after the user approved a dangerous action (send, pay, publish, delete, sign, confirm, transfer, change password); otherwise such actions return status approval_required" },
             },
             required: ["tabId"],
         },
@@ -371,6 +372,7 @@ export default function register(api) {
                 text: { type: "string", description: "Text to type" },
                 pressEnter: { type: "boolean", description: "Press Enter after typing" },
                 humanized: { type: "boolean", description: "Use variable character and punctuation-aware timing" },
+                confirm: { type: "boolean", description: "Set true only after the user approved a dangerous action (send, pay, publish, delete, sign, confirm, transfer, change password); otherwise such actions return status approval_required" },
             },
             required: ["tabId", "text"],
         },
@@ -450,7 +452,7 @@ export default function register(api) {
     }));
     api.registerTool((ctx) => ({
         name: "goliath_hands",
-        description: "Run an ordered multi-step UI workflow (a 'hand') in one Goliath tab. Actions: click, type, select, check, wait, scroll, press, submit. Stops at the first failing step and returns per-step results plus failedStep. Prefer this over repeated click/type calls when filling multi-field forms.",
+        description: "Run an ordered multi-step UI workflow (a 'hand') in one Goliath tab. Actions: click, type, select, check, wait, scroll, press, submit. Stops at the first failing step and returns per-step results plus failedStep. Stops with status approval_required before a click/submit step on a dangerous control (send, pay, publish, delete, sign, confirm, transfer) unless that step has confirm: true. Prefer this over repeated click/type calls when filling multi-field forms.",
         parameters: {
             type: "object",
             properties: {
@@ -482,6 +484,7 @@ export default function register(api) {
                             amount: { type: "number" },
                             key: { type: "string" },
                             ms: { type: "number" },
+                            confirm: { type: "boolean", description: "User approved this specific dangerous step after it was refused on this tab" },
                         },
                     },
                 },

@@ -209,6 +209,69 @@ curl -sS -X POST http://localhost:9377/tabs/TAB_ID/hands \
 MCP clients use the same capability through the `goliath_hands` tool. Full
 action reference and constraints are in [AGENTS.md](AGENTS.md#hands-multi-step-workflow).
 
+## Dangerous-action brake
+
+Once an agent has hands, it needs brakes. The fast-path interaction routes
+(`/click`, `/type` with Enter, `/press` Enter, `/hands` click/submit/type+Enter/press-Enter
+steps, and `/act`; the matching `goliath_click`, `goliath_type`, `goliath_hands`,
+`goliath_act` tools) refuse to act on a control whose accessible name reads
+like a side effect: send, publish, post, delete, confirm, transfer, withdraw,
+sign, pay, purchase, place order, change password, and close synonyms.
+Instead of acting, the route returns:
+
+```json
+{
+  "ok": false,
+  "status": "approval_required",
+  "action": "Click",
+  "kind": "click",
+  "category": "send",
+  "risk": "external_side_effect",
+  "element": "Send",
+  "role": "button",
+  "domain": "www.linkedin.com",
+  "matched": "send",
+  "source": "element",
+  "hint": "This action looks like it has an external or irreversible effect. Ask the user, then retry the same request with \"confirm\": true."
+}
+```
+
+The agent harness decides whether a human must approve. To proceed it repeats
+the same request with `"confirm": true`. An approval is bound to what was
+refused: it must follow a refusal of the same kind, category, element, and
+domain on the same tab, is consumed by one use, and a pre-emptive or mismatched
+`confirm` (a ref that now resolves to a different control) is refused again with
+a hint saying so. The response to an approved action carries a `dangerous`
+annotation so it is auditable. A hand stops before the dangerous step (earlier
+steps stay applied), reports `status`, `approvalRequired.step`, and
+`failedStep`, and resumes only with `confirm: true` on that step; there is no
+hand-level approval.
+
+```bash
+curl -sS -X POST http://localhost:9377/tabs/TAB_ID/click \
+  -H 'Content-Type: application/json' \
+  -d '{"userId":"agent1","ref":"e3","confirm":true}'
+```
+
+Names are read through Playwright's accessibility layer (`ariaSnapshot`,
+isolated from page scripts), never through page-world JavaScript, and labels
+are normalized against zero-width characters, combining marks, and common
+Cyrillic/Greek homoglyphs. Clicking into a text field is never braked (it only
+focuses). An Enter submit is judged by the owning form's submit control and
+its resolved `action` URL, or, for form-less chat composers, by the buttons in
+the nearest container ("Write a message" + Enter is judged by the "Send" next to
+it). If the target's name cannot be read at all, the brake fails closed with
+`category: "unresolved_target"`.
+
+`GOLIATH_DANGEROUS_ACTIONS` selects the mode: `confirm` (default) refuses until
+confirmed, `annotate` performs the action but labels it in the response, `off`
+disables classification. Every refusal emits the `tab:approval_required`
+plugin event. The classifier is keyword-based, so it is a brake, not a policy
+engine: it cannot see intent, and an unlabeled icon button with no accessible
+name is allowed. The semantic `/actions/plan` + `/actions/execute` flow shares
+the same vocabulary (its risk is never lower than the brake's) and adds origin
+policies, prompt-injection signals, and postconditions.
+
 ## MCP and plugins
 
 Bundled plugins provide YouTube transcript extraction, persistent session storage, and optional VNC access. Enable or configure them in `goliath.config.json`.
