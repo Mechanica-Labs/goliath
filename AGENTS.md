@@ -126,6 +126,49 @@ invalidate after any step that may navigate (`click`, `submit`, or `type` with
 `submit`/`pressEnter`) — refresh the snapshot before targeting elements on the
 next page.
 
+### Dangerous actions (approval brake)
+
+`/click`, `/type` (when it submits), `/press` with Enter, `/hands` (click,
+submit, submitting type, and Enter press steps), and `/act` refuse to act on a
+control whose accessible name reads like a side effect: send, publish, post,
+delete, confirm, transfer, withdraw, sign, pay, purchase, place order, change
+password. Instead of acting they return:
+
+```json
+{
+  "ok": false,
+  "status": "approval_required",
+  "action": "Click",
+  "kind": "click",
+  "category": "send",
+  "risk": "external_side_effect",
+  "element": "Send",
+  "domain": "www.linkedin.com",
+  "source": "element",
+  "hint": "..."
+}
+```
+
+`category` is one of `change_password`, `payment`, `transfer`, `sign`,
+`delete`, `send`, `publish`, `confirm`, or `unresolved_target` (the name could
+not be read; the brake fails closed); `risk` is one of `credential_change`,
+`financial`, `legal_commitment`, `destructive`, `external_side_effect`,
+`irreversible_commit`, `unknown`. `source` says what matched: the `element`
+itself, a `nearby_control` in a form-less composer, the `form_action` path, or
+`lookup_failed`.
+
+Decide (or ask the user) and retry the **same** request with `"confirm": true`.
+The approval is bound to that refusal (same kind, category, element, domain,
+same tab) and is consumed by one use; a pre-emptive or mismatched `confirm` is
+refused again with a hint. The approved result includes a `dangerous`
+annotation. A hand stops before the dangerous step with
+`status: "approval_required"`, `approvalRequired.step`, and `failedStep`;
+re-run the remaining steps with `confirm: true` on that step only (there is no
+hand-level confirm). Clicking into a text field is never braked. An Enter
+submit is judged by the form's submit control and `action` URL, or by the
+buttons next to a form-less composer. `GOLIATH_DANGEROUS_ACTIONS` can be set to
+`annotate` (act, but label) or `off`.
+
 ### Navigation
 ```bash
 POST /tabs/:tabId/back     {"userId": "agent1"}
@@ -216,6 +259,7 @@ docker run -p 9377:9377 goliath
 - `lib/cookies.js` - Cookie file I/O
 - `lib/metrics.js` - Prometheus metrics (lazy-loaded, off by default -- set `PROMETHEUS_ENABLED=1`)
 - `lib/request-utils.js` - HTTP request classification helpers (`actionFromReq`, `classifyError`)
+- `lib/dangerous-actions.js` - Keyword brake for click/type/press/hands/act on send/pay/publish/delete/sign/confirm controls (`GOLIATH_DANGEROUS_ACTIONS`)
 - `lib/snapshot.js` - Accessibility tree snapshot
 - `lib/macros.js` - Search macro URL expansion
 - `lib/plugins.js` - Plugin loader and event bus
@@ -384,9 +428,9 @@ export function register(app, ctx) {
 | `createMetric` | `async function` | Create a Prometheus metric registered to the shared registry (see below) |
 | `metricsRegistry` | `function` | `metricsRegistry()` -- raw prom-client Registry or null |
 
-### Events (30)
+### Events (31)
 
-29 emitted by core, 1 (`session:storage:export`) emitted by plugins.
+30 emitted by core, 1 (`session:storage:export`) emitted by plugins.
 
 #### Browser Lifecycle
 | Event | Payload | Mutating? |
@@ -430,6 +474,7 @@ export function register(app, ctx) {
 | `tab:scroll` | `{ userId, tabId, direction, amount }` |
 | `tab:press` | `{ userId, tabId, key }` |
 | `tab:upload` | `{ userId, tabId, count }` |
+| `tab:approval_required` | `{ userId, tabId, action, kind, category, risk, element, domain, source, ref?, selector?, key?, step? }` -- a click/type/press/hands/act request was refused pending confirmation |
 
 #### Downloads
 | Event | Payload |

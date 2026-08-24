@@ -167,7 +167,7 @@ export const TOOL_DEFS = [
   },
   {
     name: 'goliath_click',
-    description: 'Click an element by snapshot ref or CSS selector.',
+    description: 'Click an element by snapshot ref or CSS selector. Clicking a control that sends, pays, publishes, deletes, signs, confirms, or transfers returns status approval_required until the call is repeated with confirm: true.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -175,6 +175,7 @@ export const TOOL_DEFS = [
         ref: { type: 'string', description: 'Element ref from the latest snapshot' },
         selector: { type: 'string', description: 'CSS selector alternative to ref' },
         humanized: HUMANIZED_INPUT_SCHEMA,
+        confirm: { type: 'boolean', description: 'Set true only after the user approved a dangerous action (send, pay, publish, delete, sign, confirm, transfer, change password). Without it such actions return status approval_required instead of executing.' },
       },
       required: ['tabId'],
       additionalProperties: false,
@@ -182,7 +183,7 @@ export const TOOL_DEFS = [
   },
   {
     name: 'goliath_type',
-    description: 'Fill or type text into a form control by snapshot ref or CSS selector.',
+    description: 'Fill or type text into a form control by snapshot ref or CSS selector. With pressEnter, submitting a form whose submit control or action is dangerous returns status approval_required until repeated with confirm: true.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -192,6 +193,7 @@ export const TOOL_DEFS = [
         text: { type: 'string' },
         pressEnter: { type: 'boolean' },
         humanized: HUMANIZED_INPUT_SCHEMA,
+        confirm: { type: 'boolean', description: 'Set true only after the user approved a dangerous action (send, pay, publish, delete, sign, confirm, transfer, change password). Without it such actions return status approval_required instead of executing.' },
       },
       required: ['tabId', 'text'],
       additionalProperties: false,
@@ -230,7 +232,7 @@ export const TOOL_DEFS = [
   {
     name: 'goliath_hands',
     description:
-      'Run an ordered multi-step UI workflow in one tab. Use this for forms and other workflows that would otherwise require repeated click, type, select, check, wait, scroll, press, or submit calls. Stops at the first failing step.',
+      'Run an ordered multi-step UI workflow in one tab. Use this for forms and other workflows that would otherwise require repeated click, type, select, check, wait, scroll, press, or submit calls. Stops at the first failing step, and stops with status approval_required before any click/submit step that targets a dangerous control (send, pay, publish, delete, sign, confirm, transfer) unless that step carries confirm: true.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -259,6 +261,7 @@ export const TOOL_DEFS = [
               amount: { type: 'number', minimum: 1 },
               key: { type: 'string' },
               ms: { type: 'number', minimum: 0, maximum: 5000 },
+              confirm: { type: 'boolean', description: 'User approved this specific dangerous step after it was refused on this tab' },
             },
             required: ['action'],
             additionalProperties: false,
@@ -314,6 +317,7 @@ export const TOOL_DEFS = [
         sourceSelector: { type: 'string' },
         targetRef: { type: 'string' },
         targetSelector: { type: 'string' },
+        confirm: { type: 'boolean', description: 'Set true only after the user approved a dangerous Enter press that was refused on this tab' },
       },
       required: ['tabId', 'kind'],
       additionalProperties: false,

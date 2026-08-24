@@ -137,11 +137,11 @@
       },
       {
         "name": "goliath_click",
-        "description": "Click an element by ref or CSS selector"
+        "description": "Click an element by ref or CSS selector; dangerous controls return approval_required until confirmed"
       },
       {
         "name": "goliath_type",
-        "description": "Type text into an element"
+        "description": "Type text into an element; a dangerous Enter submit returns approval_required until confirmed"
       },
       {
         "name": "goliath_navigate",
@@ -153,7 +153,7 @@
       },
       {
         "name": "goliath_hands",
-        "description": "Run an ordered multi-step UI workflow in one tab"
+        "description": "Run an ordered multi-step UI workflow in one tab; stops with approval_required before dangerous steps"
       },
       {
         "name": "goliath_behavior",

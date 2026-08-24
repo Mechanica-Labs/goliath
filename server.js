@@ -48,6 +48,7 @@ import { initSentry, captureException as sentryCaptureException, setupExpressErr
 import { prepareExternalCamoufoxExecutable } from './lib/camoufox-executable.js';
 import { humanizedClick, humanizedOptions, humanizedScroll, humanizedType } from './lib/humanized-input.js';
 import { coerceHandsSteps, HandsError, computeHandBudgetMs } from './lib/hands.js';
+import { approvalRequiredResponse, classifyDangerousAction, normalizeActionLabel } from './lib/dangerous-actions.js';
 import { behaviorReport, createBehaviorTracker, recordBehaviorEvent } from './lib/behavior.js';
 import { applyFingerprintCoherence } from './lib/fingerprint.js';
 import tui from './lib/tui.js';
@@ -3790,15 +3791,26 @@ app.post('/tabs/:tabId/wait', async (req, res) => {
  *                     type: number
  *                   y:
  *                     type: number
+ *               confirm:
+ *                 type: boolean
+ *                 description: >
+ *                   Required to click a control classified as dangerous (send, pay, publish,
+ *                   delete, sign, confirm, transfer, change password). Without it the route
+ *                   returns an ApprovalRequired body instead of clicking.
  *     responses:
  *       423:
  *         description: Tab paused for human handoff.
  *       200:
- *         description: Click result with optional post-action snapshot.
+ *         description: >
+ *           Click result with optional post-action snapshot, or an ApprovalRequired body
+ *           (`status: approval_required`) when the target is a dangerous control and
+ *           `confirm` was not true.
  *         content:
  *           application/json:
  *             schema:
- *               type: object
+ *               anyOf:
+ *                 - type: object
+ *                 - $ref: '#/components/schemas/ApprovalRequired'
  *       400:
  *         description: Bad request.
  *         content:
@@ -3832,6 +3844,7 @@ app.post('/tabs/:tabId/click', async (req, res) => {
     }
     
     let inputResult = { mode: 'direct' };
+    let dangerousAnnotation = null;
     const result = await withUserLimit(userId, () => withTabMutationLock(tabId, tabState, async () => {
       const clickStart = Date.now();
       const remainingBudget = () => Math.max(0, HANDLER_TIMEOUT_MS - 2000 - (Date.now() - clickStart));
@@ -3906,6 +3919,8 @@ app.post('/tabs/:tabId/click', async (req, res) => {
         }
       };
       
+      let clickTarget;
+      let clickTargetIsLocator = false;
       if (ref) {
         let locator = refToLocator(tabState.page, ref, tabState.refs);
         if (!locator) {
@@ -3927,10 +3942,19 @@ app.post('/tabs/:tabId/click', async (req, res) => {
           const maxRef = tabState.refs.size > 0 ? `e${tabState.refs.size}` : 'none';
           throw new StaleRefsError(ref, maxRef, tabState.refs.size);
         }
-        await doClick(locator, true);
+        clickTarget = locator;
+        clickTargetIsLocator = true;
       } else {
-        await doClick(selector, false);
+        clickTarget = tabState.page.locator(selector);
+        clickTargetIsLocator = true;
       }
+
+      // Brake: refuse clicks on send/pay/publish/delete/sign/confirm controls unless confirmed.
+      const guard = await guardDangerousAction(tabState, { kind: 'click', ref, selector, confirm: req.body.confirm, locator: clickTarget });
+      if (guard.decision === 'approval_required') return { approvalRequired: guard.dangerous };
+      dangerousAnnotation = guard.dangerous;
+
+      await doClick(clickTarget, clickTargetIsLocator);
       
       // If clicking on a Google SERP, wait for potential navigation to complete
       if (onGoogleSerp) {
@@ -3968,9 +3992,11 @@ app.post('/tabs/:tabId/click', async (req, res) => {
       return { ok: true, url: newUrl, refsAvailable: tabState.refs.size > 0 };
     }));
     
+    if (result.approvalRequired) return refuseDangerous(req, res, { userId, tabId, dangerous: result.approvalRequired, route: 'click', extra: { ref, selector } });
     if (!inputConfig.enabled) recordBehaviorEvent(tabState.behavior, 'click', { mode: 'direct' });
     result.input = inputResult;
     result.behavior = behaviorReport(tabState.behavior);
+    if (dangerousAnnotation) result.dangerous = dangerousAnnotation;
     log('info', 'clicked', { reqId: req.reqId, tabId, url: result.url, inputMode: inputResult.mode });
     pluginEvents.emit('tab:click', { userId: req.body.userId, tabId, ref: req.body.ref, selector: req.body.selector, humanized: inputConfig.enabled });
     res.json(result);
@@ -4221,15 +4247,25 @@ app.post('/tabs/:tabId/upload', authMiddleware(), async (req, res) => {
  *               submit:
  *                 type: boolean
  *                 description: Press Enter after typing.
+ *               confirm:
+ *                 type: boolean
+ *                 description: >
+ *                   Required when submit/pressEnter would submit a form whose submit control
+ *                   or action URL is classified as dangerous; otherwise the route returns an
+ *                   ApprovalRequired body before typing anything.
  *     responses:
  *       423:
  *         description: Tab paused for human handoff.
  *       200:
- *         description: Type result.
+ *         description: >
+ *           Type result, or an ApprovalRequired body (`status: approval_required`) when
+ *           the submit is dangerous and `confirm` was not true.
  *         content:
  *           application/json:
  *             schema:
- *               type: object
+ *               anyOf:
+ *                 - type: object
+ *                 - $ref: '#/components/schemas/ApprovalRequired'
  *       400:
  *         description: Bad request.
  *         content:
@@ -4270,7 +4306,8 @@ app.post('/tabs/:tabId/type', async (req, res) => {
     const shouldSubmit = submit || pressEnter;
     
     let inputResult = { mode: mode === 'keyboard' ? 'keyboard-fixed-delay' : 'fill' };
-    await withTabMutationLock(tabId, tabState, async () => {
+    let dangerousAnnotation = null;
+    const typeOutcome = await withTabMutationLock(tabId, tabState, async () => {
       // Resolve and focus the target if ref/selector provided
       let locator = null;
       if (ref) {
@@ -4281,6 +4318,17 @@ app.post('/tabs/:tabId/type', async (req, res) => {
           locator = refToLocator(tabState.page, ref, tabState.refs);
         }
         if (!locator) { const maxRef = tabState.refs.size > 0 ? `e${tabState.refs.size}` : 'none'; throw new StaleRefsError(ref, maxRef, tabState.refs.size); }
+      }
+
+      // Brake: a submitting type (Enter) is checked before any text is entered, so a
+      // refused request leaves the field untouched.
+      if (shouldSubmit) {
+        const guard = await guardDangerousAction(tabState, {
+          kind: 'type_submit', ref, selector, confirm: req.body.confirm, submitContext: true,
+          locator: locator || (selector ? tabState.page.locator(selector) : null),
+        });
+        if (guard.decision === 'approval_required') return { approvalRequired: guard.dangerous };
+        dangerousAnnotation = guard.dangerous;
       }
       
       if (inputConfig.enabled) {
@@ -4314,11 +4362,15 @@ app.post('/tabs/:tabId/type', async (req, res) => {
         await tabState.page.keyboard.press('Enter');
         recordBehaviorEvent(tabState.behavior, 'key', { category: 'submit' });
       }
+      return { ok: true };
     });
+    if (typeOutcome?.approvalRequired) return refuseDangerous(req, res, { userId, tabId, dangerous: typeOutcome.approvalRequired, route: 'type', extra: { ref, selector } });
     
     if (!inputConfig.enabled) recordBehaviorEvent(tabState.behavior, 'type', { mode });
     pluginEvents.emit('tab:type', { userId: req.body.userId, tabId, text: req.body.text, ref: req.body.ref, mode: req.body.mode || 'fill', humanized: inputConfig.enabled });
-    res.json({ ok: true, input: inputResult, behavior: behaviorReport(tabState.behavior) });
+    const typeResponse = { ok: true, input: inputResult, behavior: behaviorReport(tabState.behavior) };
+    if (dangerousAnnotation) typeResponse.dangerous = dangerousAnnotation;
+    res.json(typeResponse);
   } catch (err) {
     log('error', 'type failed', { reqId: req.reqId, error: err.message });
     if (err.message?.includes('timed out') || err.message?.includes('not an <input>')) {
@@ -4369,18 +4421,25 @@ app.post('/tabs/:tabId/type', async (req, res) => {
  *               key:
  *                 type: string
  *                 description: Key name (e.g. "Enter", "Escape", "Tab").
+ *               confirm:
+ *                 type: boolean
+ *                 description: Required to press Enter when the focused form's submit control or action is classified as dangerous.
  *     responses:
  *       423:
  *         description: Tab paused for human handoff.
  *       200:
- *         description: Key pressed.
+ *         description: >
+ *           Key pressed, or an ApprovalRequired body (`status: approval_required`) when Enter
+ *           would submit something dangerous and `confirm` was not true.
  *         content:
  *           application/json:
  *             schema:
- *               type: object
- *               properties:
- *                 ok:
- *                   type: boolean
+ *               anyOf:
+ *                 - type: object
+ *                   properties:
+ *                     ok:
+ *                       type: boolean
+ *                 - $ref: '#/components/schemas/ApprovalRequired'
  *       404:
  *         description: Tab not found.
  *         content:
@@ -4401,13 +4460,22 @@ app.post('/tabs/:tabId/press', async (req, res) => {
     const { tabState } = found;
     tabState.toolCalls++; tabState.consecutiveTimeouts = 0; tabState.consecutiveFailures = 0;
     
-    await withTabMutationLock(tabId, tabState, async () => {
+    let dangerousAnnotation = null;
+    const pressOutcome = await withTabMutationLock(tabId, tabState, async () => {
+      // Brake: Enter submits whatever is focused, so it is judged like a submit.
+      if (isEnterKey(key)) {
+        const guard = await guardDangerousAction(tabState, { kind: 'submit', confirm: req.body.confirm, submitContext: true });
+        if (guard.decision === 'approval_required') return { approvalRequired: guard.dangerous };
+        dangerousAnnotation = guard.dangerous;
+      }
       await tabState.page.keyboard.press(key);
       recordBehaviorEvent(tabState.behavior, 'key', { category: 'press' });
+      return { ok: true };
     });
+    if (pressOutcome?.approvalRequired) return refuseDangerous(req, res, { userId, tabId, dangerous: pressOutcome.approvalRequired, route: 'press', extra: { key } });
     
     pluginEvents.emit('tab:press', { userId, tabId, key });
-    res.json({ ok: true });
+    res.json(dangerousAnnotation ? { ok: true, dangerous: dangerousAnnotation } : { ok: true });
   } catch (err) {
     log('error', 'press failed', { reqId: req.reqId, error: err.message });
     handleRouteError(err, req, res);
@@ -4509,6 +4577,170 @@ app.post('/tabs/:tabId/scroll', async (req, res) => {
   }
 });
 
+// --- Dangerous-action brake ---------------------------------------------------
+// Classification lives in lib/dangerous-actions.js (pure). These helpers gather
+// what the classifier needs through Playwright's utility world (ariaSnapshot,
+// getAttribute, count), never through page-world JavaScript: a hostile page
+// cannot override prototype getters to blind the brake. Lookup failures fail
+// CLOSED (classified as unresolved_target).
+
+const DANGEROUS_DESCRIBE_TIMEOUT_MS = 2500;
+const TEXT_ENTRY_ROLES = new Set(['textbox', 'searchbox', 'combobox', 'spinbutton', 'slider']);
+const ENTER_KEYS = new Set(['enter', 'numpadenter']);
+const ARIA_ROOT_RE = /^\s*-\s+([a-z]+)(?:\s+"((?:[^"\\]|\\.)*)")?/;
+const ARIA_CONTROL_RE = /^\s*-\s+(?:button|link|menuitem)\s+"((?:[^"\\]|\\.)*)"/gm;
+const MAX_NEARBY_CONTROLS = 20;
+
+function dangerousActionsMode() {
+  return CONFIG.dangerousActionsMode || 'confirm';
+}
+
+function isEnterKey(key) {
+  return typeof key === 'string' && ENTER_KEYS.has(key.trim().toLowerCase());
+}
+
+function unescapeAria(value) {
+  return String(value || '').replace(/\\(["\\])/g, '$1');
+}
+
+function parseAriaRoot(yaml) {
+  const line = String(yaml || '').split('\n').find(entry => entry.trim());
+  const match = line && ARIA_ROOT_RE.exec(line);
+  return match ? { role: match[1], name: unescapeAria(match[2]) } : null;
+}
+
+function ariaControlNames(yaml, max = MAX_NEARBY_CONTROLS) {
+  const names = [];
+  const re = new RegExp(ARIA_CONTROL_RE.source, 'gm');
+  let match;
+  while ((match = re.exec(String(yaml || ''))) && names.length < max) names.push(unescapeAria(match[1]));
+  return names;
+}
+
+// Accessible role/name of the element itself (not of its descendants).
+async function describeTarget(locator) {
+  const yaml = await locator.first().ariaSnapshot({ timeout: DANGEROUS_DESCRIBE_TIMEOUT_MS });
+  return parseAriaRoot(yaml) || { role: null, name: '' };
+}
+
+// For Enter-key submits: the owning form's submit control and resolved action
+// URL, or for form-less composers (chat UIs) the buttons in the nearest
+// container, so "Write a message" + Enter is judged by the "Send" button next to it.
+async function describeSubmitContext(page, locator) {
+  const opts = { timeout: DANGEROUS_DESCRIBE_TIMEOUT_MS };
+  const target = (locator || page.locator(':focus')).first();
+  const form = target.locator('xpath=ancestor-or-self::form[1]');
+  if (await form.count() > 0) {
+    let submitControl = form.locator('button[type="submit"], input[type="submit"]').first();
+    if (await submitControl.count() === 0) submitControl = form.locator('button:not([type])').first();
+    const name = await submitControl.count() > 0 ? (await describeTarget(submitControl)).name : '';
+    const candidates = ariaControlNames(await form.ariaSnapshot(opts));
+    const rawAction = await form.getAttribute('action', opts);
+    let formAction = '';
+    if (rawAction) {
+      try { formAction = new URL(rawAction, page.url()).href; } catch { formAction = rawAction; }
+    }
+    return { name, candidates, formAction };
+  }
+  const container = target.locator('xpath=ancestor::*[.//button or .//*[@role="button"]][1]');
+  if (await container.count() > 0) {
+    return { name: '', candidates: ariaControlNames(await container.ariaSnapshot(opts)), formAction: '' };
+  }
+  return { name: '', candidates: [], formAction: '' };
+}
+
+// An approval is bound to what was refused: same kind, category, element, and
+// domain on the same tab. `confirm: true` for anything else is refused again, so
+// a ref that re-resolved to a different control after the human answered
+// cannot ride on the earlier approval.
+function approvalKey(dangerous, fallbackElement) {
+  return [dangerous.kind, dangerous.category, normalizeActionLabel(dangerous.element || fallbackElement || ''), dangerous.domain || ''].join('|');
+}
+
+/**
+ * Decide whether an interaction may proceed. Call inside the tab lock once the
+ * target has been resolved so ref names come from fresh refs.
+ *
+ * @returns {Promise<{decision:'allow'|'approval_required'|'annotate', dangerous:object|null}>}
+ */
+async function guardDangerousAction(tabState, { kind, ref, selector, locator, confirm = false, submitContext = false }) {
+  const mode = dangerousActionsMode();
+  if (mode === 'off') return { decision: 'allow', dangerous: null };
+  let element = '';
+  let role = null;
+  let formAction = '';
+  let candidates;
+  let unresolved = false;
+  const refEntry = ref && tabState.refs instanceof Map ? tabState.refs.get(ref) : null;
+  if (refEntry) {
+    element = refEntry.name || '';
+    role = refEntry.role || null;
+  }
+  try {
+    if (submitContext) {
+      // A targeted submit may point at the control itself (a "Send" button) or at
+      // the field being submitted; judge the control by name, the field by its form.
+      element = '';
+      if (locator) {
+        const described = await describeTarget(locator);
+        if (described.role && !TEXT_ENTRY_ROLES.has(described.role) && described.name) {
+          element = described.name;
+          role = described.role;
+        }
+      }
+      const context = await describeSubmitContext(tabState.page, locator);
+      if (!element) {
+        element = context.name;
+        role = context.name ? 'button' : null;
+      }
+      candidates = context.candidates;
+      formAction = context.formAction;
+    } else if (locator && !element) {
+      const described = await describeTarget(locator);
+      element = described.name;
+      role = described.role || role;
+    }
+  } catch (err) {
+    unresolved = true;
+    log('warn', 'dangerous-action: target lookup failed', { kind, ref, selector, error: err.message });
+  }
+  // Clicking into a field only focuses it; the submit brake covers what Enter does next.
+  if (!submitContext && !unresolved && role && TEXT_ENTRY_ROLES.has(role)) return { decision: 'allow', dangerous: null };
+
+  let url = '';
+  try { url = tabState.page.url(); } catch {}
+  const dangerous = classifyDangerousAction({ kind, element, candidates, role, url, formAction, unresolved });
+  if (!dangerous) return { decision: 'allow', dangerous: null };
+
+  const key = approvalKey(dangerous, ref || selector);
+  let decision = 'approval_required';
+  if (mode === 'annotate') {
+    decision = 'annotate';
+  } else if (confirm === true && tabState.lastRefusal?.key === key) {
+    decision = 'annotate';
+    tabState.lastRefusal = null;
+  } else {
+    tabState.lastRefusal = { key, at: Date.now() };
+    if (confirm === true) {
+      dangerous.hint = 'confirm was set, but no matching refusal exists on this tab (nothing was refused yet, or the target or its classification changed since). Review this refusal, then retry with "confirm": true.';
+    }
+  }
+  log('info', 'dangerous-action classified', {
+    kind, decision, category: dangerous.category, risk: dangerous.risk, element: dangerous.element,
+    domain: dangerous.domain, source: dangerous.source, selector: selector || undefined, ref: ref || undefined,
+  });
+  return { decision, dangerous };
+}
+
+function refuseDangerous(req, res, { userId, tabId, dangerous, route, extra = {}, hint }) {
+  pluginEvents.emit('tab:approval_required', {
+    userId, tabId, action: dangerous.action, kind: dangerous.kind, category: dangerous.category,
+    risk: dangerous.risk, element: dangerous.element, domain: dangerous.domain, source: dangerous.source, ...extra,
+  });
+  log('info', `${route} refused: approval required`, { reqId: req.reqId, tabId, category: dangerous.category, element: dangerous.element, source: dangerous.source });
+  return res.json(approvalRequiredResponse(dangerous, { hint }));
+}
+
 // --- Hands ("voodoo hands"): multi-step form automation primitives ----------
 
 async function resolveHandLocator(tabState, step) {
@@ -4576,7 +4808,7 @@ async function handsClick(tabState, locator, inputConfig, doubleClick = false) {
   }
 }
 
-async function handsType(tabState, step, inputConfig) {
+async function handsType(tabState, step, inputConfig, preResolved = null) {
   const { text, mode = 'fill', submit = false, pressEnter = false } = step;
   const shouldSubmit = submit || pressEnter;
   let inputResult = { mode: mode === 'keyboard' ? 'keyboard-fixed-delay' : 'fill' };
@@ -4584,8 +4816,8 @@ async function handsType(tabState, step, inputConfig) {
   // Fill mode always resolves its target. Keyboard mode resolves and focuses a
   // target only when ref/selector is supplied; otherwise it types into the
   // current focus, mirroring the existing /type route.
-  let locator = null;
-  if (mode === 'fill' || step.ref || step.selector) {
+  let locator = preResolved;
+  if (!locator && (mode === 'fill' || step.ref || step.selector)) {
     locator = await resolveHandLocator(tabState, step);
   }
 
@@ -4649,9 +4881,9 @@ async function handsPress(tabState, step) {
   return { key: step.key };
 }
 
-async function handsSubmit(tabState, step, inputConfig) {
+async function handsSubmit(tabState, step, inputConfig, preResolved = null) {
   if (step.ref || step.selector) {
-    const locator = await resolveHandLocator(tabState, step);
+    const locator = preResolved || await resolveHandLocator(tabState, step);
     await handsClick(tabState, locator, inputConfig);
     return { mode: 'click' };
   }
@@ -4660,12 +4892,41 @@ async function handsSubmit(tabState, step, inputConfig) {
   return { mode: 'enter' };
 }
 
-async function executeHandStep(tabState, step, inputConfig) {
+/**
+ * Dangerous-action brake for one hand step. Only click, submit, submitting
+ * type, and Enter press steps can have side effects worth braking on. The
+ * resolved locator is returned so execution targets exactly the element the
+ * brake judged.
+ */
+async function guardHandStep(tabState, step) {
+  const confirm = step.confirm === true;
+  const hasTarget = Boolean(step.ref || step.selector);
+  if (step.action === 'click') {
+    const locator = await resolveHandLocator(tabState, step);
+    return { ...(await guardDangerousAction(tabState, { kind: 'click', ref: step.ref, selector: step.selector, locator, confirm })), locator };
+  }
+  if (step.action === 'submit') {
+    const locator = hasTarget ? await resolveHandLocator(tabState, step) : null;
+    // Targeted or not, a submit is judged by the control's own name and its form.
+    const guard = await guardDangerousAction(tabState, { kind: 'submit', ref: step.ref, selector: step.selector, locator, confirm, submitContext: true });
+    return { ...guard, locator };
+  }
+  if (step.action === 'type' && (step.submit || step.pressEnter)) {
+    const locator = (step.mode !== 'keyboard' || hasTarget) ? await resolveHandLocator(tabState, step) : null;
+    return { ...(await guardDangerousAction(tabState, { kind: 'type_submit', ref: step.ref, selector: step.selector, locator, confirm, submitContext: true })), locator };
+  }
+  if (step.action === 'press' && isEnterKey(step.key)) {
+    return { ...(await guardDangerousAction(tabState, { kind: 'submit', confirm, submitContext: true })), locator: null };
+  }
+  return { decision: 'allow', dangerous: null, locator: null };
+}
+
+async function executeHandStep(tabState, step, inputConfig, locator = null) {
   switch (step.action) {
     case 'click':
-      return await handsClick(tabState, await resolveHandLocator(tabState, step), inputConfig, step.doubleClick);
+      return await handsClick(tabState, locator || await resolveHandLocator(tabState, step), inputConfig, step.doubleClick);
     case 'type':
-      return await handsType(tabState, step, inputConfig);
+      return await handsType(tabState, step, inputConfig, locator);
     case 'select':
       return await handsSelect(tabState, step);
     case 'check':
@@ -4677,7 +4938,7 @@ async function executeHandStep(tabState, step, inputConfig) {
     case 'press':
       return await handsPress(tabState, step);
     case 'submit':
-      return await handsSubmit(tabState, step, inputConfig);
+      return await handsSubmit(tabState, step, inputConfig, locator);
     default:
       throw new HandsError(`unsupported action "${step.action}"`);
   }
@@ -4757,6 +5018,9 @@ async function executeHandStep(tabState, step, inputConfig) {
  *                     ms:
  *                       type: integer
  *                       description: Wait duration. Values over 5000 are clamped to 5000.
+ *                     confirm:
+ *                       type: boolean
+ *                       description: User approved this specific dangerous step (after it was refused on this tab).
  *               humanized:
  *                 description: Use humanized pointer/key timing across the hand.
  *                 oneOf:
@@ -4772,7 +5036,11 @@ async function executeHandStep(tabState, step, inputConfig) {
  *       423:
  *         description: Tab paused for human handoff.
  *       200:
- *         description: Hand result with per-step outcomes.
+ *         description: >
+ *           Hand result with per-step outcomes. When a click/submit step targets a
+ *           dangerous control without confirm, the hand stops before that step with
+ *           `status: approval_required`, `approvalRequired` (an ApprovalRequired body
+ *           plus `step`), and `failedStep`.
  *         content:
  *           application/json:
  *             schema:
@@ -4818,6 +5086,7 @@ app.post('/tabs/:tabId/hands', async (req, res) => {
 
     const results = [];
     let abortedAt = null;
+    let approvalRequired = null;
 
     // Budget scaling for hands. Humanized interaction is deliberately slow — a
     // single humanized click on a live browser traverses a real pointer path +
@@ -4852,8 +5121,20 @@ app.post('/tabs/:tabId/hands', async (req, res) => {
         }
         const step = steps[i];
         try {
-          const out = await executeHandStep(tabState, step, inputConfig);
-          results.push({ index: i, action: step.action, ok: true, ...out });
+          const guard = await guardHandStep(tabState, step);
+          if (guard.decision === 'approval_required') {
+            approvalRequired = guard.dangerous;
+            // Keep `action` as the step's action name (results[] contract); the
+            // human-readable label lives in the top-level approvalRequired body.
+            const { action: _label, ...refusal } = approvalRequiredResponse(guard.dangerous, {
+              hint: guard.dangerous.hint || 'Ask the user, then re-run the remaining steps with "confirm": true on this step.',
+            });
+            results.push({ index: i, action: step.action, ...refusal });
+            abortedAt = i;
+            break;
+          }
+          const out = await executeHandStep(tabState, step, inputConfig, guard.locator);
+          results.push({ index: i, action: step.action, ok: true, ...(guard.dangerous ? { dangerous: guard.dangerous } : {}), ...out });
           // Invalidate refs after any step that may navigate, so the next ref resolution rebuilds.
           if (step.action === 'click' || step.action === 'submit' || (step.action === 'type' && (step.submit || step.pressEnter))) {
             tabState.lastSnapshot = null;
@@ -4870,6 +5151,15 @@ app.post('/tabs/:tabId/hands', async (req, res) => {
 
     result.results = results;
     if (abortedAt !== null) result.failedStep = abortedAt;
+    if (approvalRequired) {
+      result.status = 'approval_required';
+      result.approvalRequired = { ...approvalRequired, step: abortedAt };
+      pluginEvents.emit('tab:approval_required', {
+        userId, tabId, action: approvalRequired.action, kind: approvalRequired.kind, category: approvalRequired.category,
+        risk: approvalRequired.risk, element: approvalRequired.element, domain: approvalRequired.domain, source: approvalRequired.source, step: abortedAt,
+      });
+      log('info', 'hands stopped: approval required', { reqId: req.reqId, tabId, step: abortedAt, category: approvalRequired.category, element: approvalRequired.element });
+    }
     pluginEvents.emit('tab:hands', { userId, tabId, steps: steps.length, completed: result.completed, humanized: inputConfig.enabled });
     res.json(result);
   } catch (err) {
@@ -7427,6 +7717,7 @@ app.post('/act', async (req, res) => {
           if (!ref && !selector) {
             throw new Error('ref or selector required');
           }
+          let actTarget;
           
           const doClick = async (locatorOrSelector, isLocator) => {
             const locator = isLocator ? locatorOrSelector : tabState.page.locator(locatorOrSelector);
@@ -7452,14 +7743,17 @@ app.post('/act', async (req, res) => {
               locator = refToLocator(tabState.page, ref, tabState.refs);
             }
             if (!locator) { const maxRef = tabState.refs.size > 0 ? `e${tabState.refs.size}` : 'none'; throw new StaleRefsError(ref, maxRef, tabState.refs.size); }
-            await doClick(locator, true);
+            actTarget = locator;
           } else {
-            await doClick(selector, false);
+            actTarget = tabState.page.locator(selector);
           }
+          const guard = await guardDangerousAction(tabState, { kind: 'click', ref, selector, locator: actTarget, confirm: params.confirm });
+          if (guard.decision === 'approval_required') return { approvalRequired: guard.dangerous, extra: { ref, selector } };
+          await doClick(actTarget, true);
           
           await tabState.page.waitForTimeout(500);
           tabState.refs = await buildRefs(tabState.page);
-          return { ok: true, targetId, url: tabState.page.url() };
+          return { ok: true, targetId, url: tabState.page.url(), ...(guard.dangerous ? { dangerous: guard.dangerous } : {}) };
         }
         
         case 'type': {
@@ -7484,6 +7778,15 @@ app.post('/act', async (req, res) => {
             }
             if (!locator) { const maxRef = tabState.refs.size > 0 ? `e${tabState.refs.size}` : 'none'; throw new StaleRefsError(ref, maxRef, tabState.refs.size); }
           }
+          let actDangerous = null;
+          if (submit) {
+            const guard = await guardDangerousAction(tabState, {
+              kind: 'type_submit', ref, selector, confirm: params.confirm, submitContext: true,
+              locator: locator || (selector ? tabState.page.locator(selector) : null),
+            });
+            if (guard.decision === 'approval_required') return { approvalRequired: guard.dangerous, extra: { ref, selector } };
+            actDangerous = guard.dangerous;
+          }
           
           if (mode === 'fill') {
             if (locator) {
@@ -7500,14 +7803,20 @@ app.post('/act', async (req, res) => {
             await tabState.page.keyboard.type(text, { delay });
           }
           if (submit) await tabState.page.keyboard.press('Enter');
-          return { ok: true, targetId };
+          return { ok: true, targetId, ...(actDangerous ? { dangerous: actDangerous } : {}) };
         }
         
         case 'press': {
           const { key } = params;
           if (!key) throw new Error('key is required');
+          let pressDangerous = null;
+          if (isEnterKey(key)) {
+            const guard = await guardDangerousAction(tabState, { kind: 'submit', confirm: params.confirm, submitContext: true });
+            if (guard.decision === 'approval_required') return { approvalRequired: guard.dangerous, extra: { key } };
+            pressDangerous = guard.dangerous;
+          }
           await tabState.page.keyboard.press(key);
-          return { ok: true, targetId };
+          return { ok: true, targetId, ...(pressDangerous ? { dangerous: pressDangerous } : {}) };
         }
         
         case 'scroll':
@@ -7637,6 +7946,7 @@ app.post('/act', async (req, res) => {
       tabState.lastSemanticSnapshot = null;
       tabState.actionContracts.clear();
     }
+    if (result?.approvalRequired) return refuseDangerous(req, res, { userId, tabId: targetId, dangerous: result.approvalRequired, route: 'act', extra: result.extra });
     res.json(result);
   } catch (err) {
     log('error', 'act failed', { reqId: req.reqId, kind: req.body?.kind, error: err.message });
@@ -7881,6 +8191,7 @@ const __testing = CONFIG.nodeEnv === 'test' ? {
   closeReapableSession,
   withTabLock,
   withTabMutationLock,
+  pluginEvents,
   setBrowser(value) { browser = value; },
 } : null;
 

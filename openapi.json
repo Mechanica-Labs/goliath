@@ -77,6 +77,100 @@
             "type": "string"
           }
         }
+      },
+      "ApprovalRequired": {
+        "type": "object",
+        "description": "Returned instead of acting when a click/type/hands request targets a dangerous control and confirm was not true. Set GOLIATH_DANGEROUS_ACTIONS=annotate or off to change the behavior.",
+        "required": [
+          "ok",
+          "status",
+          "action",
+          "category",
+          "risk"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              false
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "approval_required"
+            ]
+          },
+          "action": {
+            "type": "string",
+            "description": "What was about to happen, e.g. \"Click\" or \"Type and submit\"."
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "click",
+              "submit",
+              "type_submit"
+            ]
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "change_password",
+              "payment",
+              "transfer",
+              "sign",
+              "delete",
+              "send",
+              "publish",
+              "confirm",
+              "unresolved_target"
+            ]
+          },
+          "risk": {
+            "type": "string",
+            "enum": [
+              "credential_change",
+              "financial",
+              "legal_commitment",
+              "destructive",
+              "external_side_effect",
+              "irreversible_commit",
+              "unknown"
+            ]
+          },
+          "element": {
+            "type": "string",
+            "nullable": true,
+            "description": "Accessible name of the target control."
+          },
+          "role": {
+            "type": "string",
+            "nullable": true
+          },
+          "domain": {
+            "type": "string",
+            "nullable": true,
+            "description": "Hostname of the page the action targets."
+          },
+          "matched": {
+            "type": "string",
+            "nullable": true,
+            "description": "Keyword that triggered the classification."
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "element",
+              "nearby_control",
+              "form_action",
+              "lookup_failed"
+            ]
+          },
+          "hint": {
+            "type": "string"
+          }
+        }
       }
     }
   },
@@ -1304,6 +1398,10 @@
                         "type": "number"
                       }
                     }
+                  },
+                  "confirm": {
+                    "type": "boolean",
+                    "description": "Required to click a control classified as dangerous (send, pay, publish, delete, sign, confirm, transfer, change password). Without it the route returns an ApprovalRequired body instead of clicking.\n"
                   }
                 }
               }
@@ -1312,11 +1410,18 @@
         },
         "responses": {
           "200": {
-            "description": "Click result with optional post-action snapshot.",
+            "description": "Click result with optional post-action snapshot, or an ApprovalRequired body (`status: approval_required`) when the target is a dangerous control and `confirm` was not true.\n",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object"
+                  "anyOf": [
+                    {
+                      "type": "object"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ApprovalRequired"
+                    }
+                  ]
                 }
               }
             }
@@ -1533,6 +1638,10 @@
                   "submit": {
                     "type": "boolean",
                     "description": "Press Enter after typing."
+                  },
+                  "confirm": {
+                    "type": "boolean",
+                    "description": "Required when submit/pressEnter would submit a form whose submit control or action URL is classified as dangerous; otherwise the route returns an ApprovalRequired body before typing anything.\n"
                   }
                 }
               }
@@ -1541,11 +1650,18 @@
         },
         "responses": {
           "200": {
-            "description": "Type result.",
+            "description": "Type result, or an ApprovalRequired body (`status: approval_required`) when the submit is dangerous and `confirm` was not true.\n",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object"
+                  "anyOf": [
+                    {
+                      "type": "object"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ApprovalRequired"
+                    }
+                  ]
                 }
               }
             }
@@ -1609,6 +1725,10 @@
                   "key": {
                     "type": "string",
                     "description": "Key name (e.g. \"Enter\", \"Escape\", \"Tab\")."
+                  },
+                  "confirm": {
+                    "type": "boolean",
+                    "description": "Required to press Enter when the focused form's submit control or action is classified as dangerous."
                   }
                 }
               }
@@ -1617,16 +1737,23 @@
         },
         "responses": {
           "200": {
-            "description": "Key pressed.",
+            "description": "Key pressed, or an ApprovalRequired body (`status: approval_required`) when Enter would submit something dangerous and `confirm` was not true.\n",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "ok": {
-                      "type": "boolean"
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "ok": {
+                          "type": "boolean"
+                        }
+                      }
+                    },
+                    {
+                      "$ref": "#/components/schemas/ApprovalRequired"
                     }
-                  }
+                  ]
                 }
               }
             }
@@ -1855,6 +1982,10 @@
                         "ms": {
                           "type": "integer",
                           "description": "Wait duration. Values over 5000 are clamped to 5000."
+                        },
+                        "confirm": {
+                          "type": "boolean",
+                          "description": "User approved this specific dangerous step (after it was refused on this tab)."
                         }
                       }
                     }
@@ -1890,7 +2021,7 @@
         },
         "responses": {
           "200": {
-            "description": "Hand result with per-step outcomes.",
+            "description": "Hand result with per-step outcomes. When a click/submit step targets a dangerous control without confirm, the hand stops before that step with `status: approval_required`, `approvalRequired` (an ApprovalRequired body plus `step`), and `failedStep`.\n",
             "content": {
               "application/json": {
                 "schema": {

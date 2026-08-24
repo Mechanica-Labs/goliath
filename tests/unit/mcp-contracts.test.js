@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test, expect } from '@jest/globals';
 
-import { TOOL_DEFS, TOOL_NAMES, buildRequest } from '../../mcp/tool-contracts.mjs';
+import { TOOL_DEFS, TOOL_NAMES, adaptResponse, buildRequest } from '../../mcp/tool-contracts.mjs';
 
 const root = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const manifest = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8'));
@@ -110,4 +110,38 @@ test('MCP screenshot without path still requests image bytes', () => {
     path: '/tabs/tab%2Fa/screenshot?userId=agent-1',
     responseKind: 'image',
   });
+});
+
+test('MCP click, type, and hands forward the dangerous-action confirm flag unchanged', () => {
+  const context = { userId: 'agent-1', sessionKey: 'task-1' };
+  expect(buildRequest('goliath_click', { tabId: 'tab/a', ref: 'e1', confirm: true }, context)).toMatchObject({
+    path: '/tabs/tab%2Fa/click',
+    body: { ref: 'e1', confirm: true, userId: 'agent-1' },
+  });
+  expect(buildRequest('goliath_type', { tabId: 'tab/a', ref: 'e1', text: 'hi', pressEnter: true, confirm: true }, context)).toMatchObject({
+    path: '/tabs/tab%2Fa/type',
+    body: { ref: 'e1', text: 'hi', pressEnter: true, confirm: true, userId: 'agent-1' },
+  });
+  expect(buildRequest('goliath_hands', {
+    tabId: 'tab/a',
+    steps: [{ action: 'click', ref: 'e3', confirm: true }],
+  }, context)).toMatchObject({
+    path: '/tabs/tab%2Fa/hands',
+    body: { steps: [{ action: 'click', ref: 'e3', confirm: true }], userId: 'agent-1' },
+  });
+  expect(buildRequest('goliath_act', { tabId: 'tab/a', kind: 'press', key: 'Enter', confirm: true }, context)).toMatchObject({
+    path: '/act',
+    body: { targetId: 'tab/a', kind: 'press', key: 'Enter', confirm: true, userId: 'agent-1' },
+  });
+  for (const name of ['goliath_click', 'goliath_type', 'goliath_act']) {
+    const tool = TOOL_DEFS.find((entry) => entry.name === name);
+    expect(tool.inputSchema.properties.confirm).toMatchObject({ type: 'boolean' });
+  }
+  const hands = TOOL_DEFS.find((entry) => entry.name === 'goliath_hands');
+  expect(hands.inputSchema.properties.confirm).toBeUndefined(); // approvals are per step, never per hand
+  expect(hands.inputSchema.properties.steps.items.properties.confirm).toMatchObject({ type: 'boolean' });
+  // The bridge passes a refusal through verbatim as a normal text result, never as an error.
+  const spec = buildRequest('goliath_click', { tabId: 'tab/a', ref: 'e1' }, context);
+  const refusal = { ok: false, status: 'approval_required', category: 'send', hint: 'ask' };
+  expect(JSON.parse(adaptResponse(spec, refusal)[0].text)).toEqual(refusal);
 });

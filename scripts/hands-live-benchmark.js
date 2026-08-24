@@ -233,6 +233,7 @@ Exit code is 0 when every gate passes, 1 otherwise.
       pass: Boolean(state.result?.success),
       handsCompleted: response ? `${response.completed}/${response.total}` : 'n/a',
       handsOk: Boolean(response?.ok),
+      approvalRequired: response?.status === 'approval_required' ? response.approvalRequired : null,
       latencyMs: Math.round(performance.now() - started),
       eventCount: state.result?.eventCount || 0,
       error: error || state.error || null,

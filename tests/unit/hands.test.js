@@ -68,3 +68,9 @@ test('hand budgets retain the fast default and cap humanized work', () => {
   expect(computeHandBudgetMs({ profile: 'deliberate', stepCount: 20, humanizedEnabled: false, handlerTimeoutMs: 30000 })).toBe(30000);
   expect(computeHandBudgetMs({ profile: 'deliberate', stepCount: 20, humanizedEnabled: true, handlerTimeoutMs: 30000 })).toBe(120000);
 });
+
+test('step-level confirm survives normalization', () => {
+  const [click, submit] = coerceHandsSteps([{ action: 'click', ref: 'e3', confirm: true }, { action: 'submit' }]);
+  expect(click.confirm).toBe(true);
+  expect(submit.confirm).toBeUndefined();
+});
