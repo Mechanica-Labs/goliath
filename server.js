@@ -11,7 +11,7 @@ import { normalizePlaywrightProxy, createProxyPool, buildProxyUrl } from './lib/
 import { createFlyHelpers } from './lib/fly.js';
 import { createPluginEvents, loadPlugins } from './lib/plugins.js';
 import { requireAuth, accessKeyMiddleware, timingSafeCompare as _timingSafeCompare, isLoopbackAddress as _isLoopbackAddress } from './lib/auth.js';
-import { windowSnapshot } from './lib/snapshot.js';
+import { windowSnapshot, filterInteractive, clampSnapshotWindow } from './lib/snapshot.js';
 import {
   MAX_DOWNLOAD_INLINE_BYTES,
   clearTabDownloads,
@@ -3144,6 +3144,23 @@ app.post('/tabs/:tabId/navigate', async (req, res) => {
  *         schema:
  *           type: integer
  *         description: Character offset for paginated retrieval.
+ *       - name: filter
+ *         in: query
+ *         schema:
+ *           type: string
+ *           enum: [interactive]
+ *         description: >-
+ *           Reduce the snapshot to agent-actionable content before windowing:
+ *           lines with element refs, iframe boundaries, headings, and their
+ *           tree ancestors. Refs remain valid; text-only content is dropped.
+ *           Pagination offsets refer to the filtered text.
+ *       - name: maxChars
+ *         in: query
+ *         schema:
+ *           type: integer
+ *           minimum: 2000
+ *           maximum: 80000
+ *         description: Per-request window budget in characters (default 80000).
  *       - name: includeScreenshot
  *         in: query
  *         schema:
@@ -3171,6 +3188,12 @@ app.post('/tabs/:tabId/navigate', async (req, res) => {
  *                   type: boolean
  *                 nextOffset:
  *                   type: integer
+ *                 filter:
+ *                   type: string
+ *                   description: Present when a filter was applied.
+ *                 fullChars:
+ *                   type: integer
+ *                   description: Unfiltered snapshot length, for measuring savings.
  *       404:
  *         description: Tab not found.
  *         content:
@@ -3184,6 +3207,16 @@ app.get('/tabs/:tabId/snapshot', async (req, res) => {
     if (!userId) return res.status(400).json({ error: 'userId required' });
     const format = req.query.format || 'text';
     const offset = parseInt(req.query.offset) || 0;
+    const filter = req.query.filter;
+    if (filter !== undefined && filter !== 'interactive') {
+      return res.status(400).json({ error: "filter must be 'interactive'" });
+    }
+    const windowChars = clampSnapshotWindow(req.query.maxChars);
+    const applyFilter = (yaml) => {
+      if (filter !== 'interactive') return { yaml, extra: {} };
+      const filtered = filterInteractive(yaml);
+      return { yaml: filtered.text, extra: { filter: 'interactive', fullChars: filtered.fullChars } };
+    };
     const session = sessions.get(normalizeUserId(userId));
     const found = session && findTab(session, req.params.tabId);
     if (!found) return tabNotFoundResponse(res, req.params.tabId || req.body?.tabId);
@@ -3194,8 +3227,9 @@ app.get('/tabs/:tabId/snapshot', async (req, res) => {
 
     // Cached chunk retrieval for offset>0 requests
     if (offset > 0 && tabState.lastSnapshot) {
-      const win = windowSnapshot(tabState.lastSnapshot, offset);
-      const response = { url: tabState.page.url(), snapshot: win.text, refsCount: tabState.refs.size, truncated: win.truncated, totalChars: win.totalChars, hasMore: win.hasMore, nextOffset: win.nextOffset };
+      const cached = applyFilter(tabState.lastSnapshot);
+      const win = windowSnapshot(cached.yaml, offset, windowChars);
+      const response = { url: tabState.page.url(), snapshot: win.text, refsCount: tabState.refs.size, truncated: win.truncated, totalChars: win.totalChars, hasMore: win.hasMore, nextOffset: win.nextOffset, ...cached.extra };
       if (req.query.includeScreenshot === 'true') {
         const pngBuffer = await tabState.page.screenshot({ type: 'png' });
         response.screenshot = { data: pngBuffer.toString('base64'), mimeType: 'image/png' };
@@ -3232,8 +3266,8 @@ app.get('/tabs/:tabId/snapshot', async (req, res) => {
         tabState.refs = googleRefs;
         tabState.lastSnapshot = googleSnapshot;
         snapshotBytes.labels('google_serp').observe(Buffer.byteLength(googleSnapshot, 'utf8'));
-        const annotatedYaml = googleSnapshot;
-        const win = windowSnapshot(annotatedYaml, 0);
+        const serp = applyFilter(googleSnapshot);
+        const win = windowSnapshot(serp.yaml, 0, windowChars);
         const response = {
           url: pageUrl,
           snapshot: win.text,
@@ -3242,6 +3276,7 @@ app.get('/tabs/:tabId/snapshot', async (req, res) => {
           totalChars: win.totalChars,
           hasMore: win.hasMore,
           nextOffset: win.nextOffset,
+          ...serp.extra,
         };
         if (req.query.includeScreenshot === 'true') {
           const pngBuffer = await tabState.page.screenshot({ type: 'png' });
@@ -3256,7 +3291,8 @@ app.get('/tabs/:tabId/snapshot', async (req, res) => {
 
       tabState.lastSnapshot = annotatedYaml;
       if (annotatedYaml) snapshotBytes.labels('full').observe(Buffer.byteLength(annotatedYaml, 'utf8'));
-      const win = windowSnapshot(annotatedYaml, 0);
+      const fresh = applyFilter(annotatedYaml);
+      const win = windowSnapshot(fresh.yaml, 0, windowChars);
 
       const response = {
         url: tabState.page.url(),
@@ -3266,6 +3302,7 @@ app.get('/tabs/:tabId/snapshot', async (req, res) => {
         totalChars: win.totalChars,
         hasMore: win.hasMore,
         nextOffset: win.nextOffset,
+        ...fresh.extra,
       };
 
       if (req.query.includeScreenshot === 'true') {

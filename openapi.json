@@ -779,6 +779,27 @@
             "description": "Character offset for paginated retrieval."
           },
           {
+            "name": "filter",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "interactive"
+              ]
+            },
+            "description": "Reduce the snapshot to agent-actionable content before windowing: lines with element refs, iframe boundaries, headings, and their tree ancestors. Refs remain valid; text-only content is dropped. Pagination offsets refer to the filtered text."
+          },
+          {
+            "name": "maxChars",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 2000,
+              "maximum": 80000
+            },
+            "description": "Per-request window budget in characters (default 80000)."
+          },
+          {
             "name": "includeScreenshot",
             "in": "query",
             "schema": {
@@ -818,6 +839,14 @@
                     },
                     "nextOffset": {
                       "type": "integer"
+                    },
+                    "filter": {
+                      "type": "string",
+                      "description": "Present when a filter was applied."
+                    },
+                    "fullChars": {
+                      "type": "integer",
+                      "description": "Unfiltered snapshot length, for measuring savings."
                     }
                   }
                 }
