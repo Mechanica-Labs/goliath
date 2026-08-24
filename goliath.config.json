@@ -12,6 +12,9 @@
     "vnc": {
       "enabled": false,
       "resolution": "1920x1080"
+    },
+    "captcha": {
+      "enabled": false
     }
   }
 }
