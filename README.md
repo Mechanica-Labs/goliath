@@ -78,6 +78,8 @@ Background state is stored in `.goliath/` beside the installed package or checko
 
 ## Agent capabilities
 
+Snapshots support `filter=interactive` (drops non-actionable text, keeps element refs, headings, iframe boundaries, and their tree ancestors — the response reports `fullChars` so the reduction is measurable) and `maxChars` (per-request window budget, paginated with `offset`).
+
 - Observe: accessibility snapshots, versioned semantic state, screenshots, links, images, structured extraction, downloads, and tab statistics.
 - Act: click, type, press keys, hover, scroll, wait, select options, drag and drop, navigate, resize the viewport, and attach files.
 - Remember: isolate state by `userId`, group tabs by `sessionKey`, restore browser profiles, and fork explicit storage checkpoints.

@@ -38,7 +38,12 @@ POST /tabs/:tabId/navigate
 ### Get Snapshot
 ```bash
 GET /tabs/:tabId/snapshot?userId=agent1
+# Agent-optimized: drop non-actionable prose, keep refs + headings + ancestors
+GET /tabs/:tabId/snapshot?userId=agent1&filter=interactive
+# Cap the returned window (2000-80000 chars); paginate with offset as usual
+GET /tabs/:tabId/snapshot?userId=agent1&maxChars=20000
 ```
+With `filter=interactive` the response adds `filter` and `fullChars` so you can measure the savings; every `eN` ref stays valid for click/type.
 Returns accessibility tree with refs:
 ```
 [heading] Example Domain
