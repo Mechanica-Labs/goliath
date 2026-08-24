@@ -580,6 +580,19 @@ async function withTimeout(promise, ms, label) {
   }
 }
 
+// Pointer dispatch can hang indefinitely inside the browser (#11). Bound it so
+// a hung mouse action fails fast, with a code the central error handler can
+// tell apart from a navigation stall (which signals a poisoned proxy session).
+const MOUSE_DISPATCH_TIMEOUT_MS = 5000;
+async function withInputDispatchTimeout(operation) {
+  try {
+    return await withTimeout(operation(), MOUSE_DISPATCH_TIMEOUT_MS, 'mouse sequence');
+  } catch (err) {
+    if (err.code === 'operation_timeout') err.code = 'input_dispatch_timeout';
+    throw err;
+  }
+}
+
 function requestTimeoutMs(baseMs = HANDLER_TIMEOUT_MS) {
   return proxyPool?.canRotateSessions ? Math.max(baseMs, 180000) : baseMs;
 }
@@ -1034,6 +1047,13 @@ function _countActiveHandles() {
   try { return process._getActiveHandles().length; } catch { return null; }
 }
 
+// Camoufox's native cursor animation ("humanize") intermittently hangs pointer
+// input at the browser boundary: page.mouse.move never resolves, the handler
+// timeout fires, and the session is torn down (#11). Goliath's own humanized
+// input layer (lib/humanized-input.js) provides humanized pointer/key cadence,
+// so the native animation stays off unless explicitly re-enabled.
+const NATIVE_HUMANIZE = process.env.GOLIATH_NATIVE_HUMANIZE === '1';
+
 async function launchBrowserInstance() {
   const hostOS = getHostOS();
   const maxAttempts = proxyPool?.launchRetries ?? 1;
@@ -1079,7 +1099,7 @@ async function launchBrowserInstance() {
         executable_path: externalGoliath?.executablePath,
         headless: useVirtualDisplay ? false : true,
         os: hostOS,
-        humanize: true,
+        humanize: NATIVE_HUMANIZE,
         enable_cache: true,
         proxy: launchProxy,
         geoip: !!launchProxy,
@@ -1451,7 +1471,11 @@ function handleRouteError(err, req, res, extraFields = {}) {
   // one poisoned page kills all subsequent navigations in that context. Destroy the
   // entire session so the next request gets a fresh BrowserContext + proxy.
   const NAVIGATION_TIMEOUT_ACTIONS = new Set(['click', 'navigate', 'open_url']);
-  if (isTimeoutError(err) && userId && NAVIGATION_TIMEOUT_ACTIONS.has(action)) {
+  // A hung pointer dispatch (#11) is a browser-side input failure, not a
+  // poisoned proxy session -- keep the session and let the tab-level
+  // consecutive-timeout accounting below handle it.
+  const inputDispatchTimeout = err?.code === 'input_dispatch_timeout';
+  if (isTimeoutError(err) && userId && NAVIGATION_TIMEOUT_ACTIONS.has(action) && !inputDispatchTimeout) {
     log('warn', 'navigation timeout — destroying session for fresh proxy', {
       action, userId, error: err.message,
     });
@@ -1460,7 +1484,7 @@ function handleRouteError(err, req, res, extraFields = {}) {
   }
   // Track consecutive timeouts per tab and auto-destroy stuck tabs
   // (for non-navigation timeouts like type, scroll that don't poison the proxy)
-  if (userId && isTimeoutError(err) && !NAVIGATION_TIMEOUT_ACTIONS.has(action)) {
+  if (userId && isTimeoutError(err) && (!NAVIGATION_TIMEOUT_ACTIONS.has(action) || inputDispatchTimeout)) {
     const tabId = req.body?.tabId || req.query?.tabId || req.params?.tabId;
     const session = sessions.get(normalizeUserId(userId));
     if (session && tabId) {
@@ -3850,7 +3874,7 @@ app.post('/tabs/:tabId/click', async (req, res) => {
       const remainingBudget = () => Math.max(0, HANDLER_TIMEOUT_MS - 2000 - (Date.now() - clickStart));
       // Full mouse event sequence for stubborn JS click handlers (mirrors Swift WebView.swift)
       // Dispatches: mouseover -> mouseenter -> mousedown -> mouseup -> click
-      const dispatchMouseSequence = async (locator) => {
+      const dispatchMouseSequence = (locator) => withInputDispatchTimeout(async () => {
         const box = await locator.boundingBox();
         if (!box) throw new Error('Element not visible (no bounding box)');
         
@@ -3867,7 +3891,7 @@ app.post('/tabs/:tabId/click', async (req, res) => {
         await tabState.page.mouse.up();
         
         log('info', 'mouse sequence dispatched', { x: x.toFixed(0), y: y.toFixed(0) });
-      };
+      });
       
       // On Google SERPs, skip the normal click attempt (always intercepted by overlays)
       // and go directly to force click -- saves 5s timeout per click
@@ -4768,7 +4792,7 @@ async function handsClick(tabState, locator, inputConfig, doubleClick = false) {
       record: (type, detail) => recordBehaviorEvent(tabState.behavior, type, detail),
     });
   }
-  const dispatchMouseSequence = async () => {
+  const dispatchMouseSequence = () => withInputDispatchTimeout(async () => {
     const box = await locator.boundingBox();
     if (!box) throw new Error('Element not visible (no bounding box)');
     const x = box.x + box.width / 2;
@@ -4782,7 +4806,7 @@ async function handsClick(tabState, locator, inputConfig, doubleClick = false) {
       await tabState.page.mouse.up();
       if (c + 1 < clicks) await tabState.page.waitForTimeout(85);
     }
-  };
+  });
   try {
     await locator.click({ timeout: 3000, clickCount: doubleClick ? 2 : 1 });
     recordBehaviorEvent(tabState.behavior, 'click', { mode: 'direct', doubleClick });
