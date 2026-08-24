@@ -433,9 +433,9 @@ export function register(app, ctx) {
 | `createMetric` | `async function` | Create a Prometheus metric registered to the shared registry (see below) |
 | `metricsRegistry` | `function` | `metricsRegistry()` -- raw prom-client Registry or null |
 
-### Events (31)
+### Events (35)
 
-30 emitted by core, 1 (`session:storage:export`) emitted by plugins.
+34 emitted by core, 1 (`session:storage:export`) emitted by plugins.
 
 #### Browser Lifecycle
 | Event | Payload | Mutating? |
@@ -451,8 +451,12 @@ export function register(app, ctx) {
 |-------|---------|-----------|
 | `session:creating` | `{ userId, contextOptions }` | (ok) Modify context options in-place |
 | `session:created` | `{ userId, context }` | |
+| `session:destroying` | `{ userId, reason }` | |
 | `session:destroyed` | `{ userId, reason }` | |
 | `session:expired` | `{ userId, idleMs }` | |
+| `session:policy:updated` | `{ userId, policy }` | |
+| `session:policy:cleared` | `{ userId }` | |
+| `session:policy:violation` | `{ userId, tabId, action, origin, category, reason }` | |
 
 #### Tab Lifecycle
 | Event | Payload |

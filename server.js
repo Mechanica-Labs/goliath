@@ -10,7 +10,7 @@ import { loadConfig } from './lib/config.js';
 import { normalizePlaywrightProxy, createProxyPool, buildProxyUrl } from './lib/proxy.js';
 import { createFlyHelpers } from './lib/fly.js';
 import { createPluginEvents, loadPlugins } from './lib/plugins.js';
-import { requireAuth, accessKeyMiddleware, timingSafeCompare as _timingSafeCompare, isLoopbackAddress as _isLoopbackAddress } from './lib/auth.js';
+import { requireAuth, requireApiKey, accessKeyMiddleware, timingSafeCompare as _timingSafeCompare, isLoopbackAddress as _isLoopbackAddress } from './lib/auth.js';
 import { windowSnapshot, filterInteractive, clampSnapshotWindow } from './lib/snapshot.js';
 import {
   MAX_DOWNLOAD_INLINE_BYTES,
@@ -26,7 +26,7 @@ import { buildSemanticSnapshot, createReadinessTracker } from './lib/semantic.js
 import { planAction, validateContract, validatePostconditions, verifyPostconditions } from './lib/action-contracts.js';
 import { createCheckpoint, deleteCheckpoint, listCheckpoints, readCheckpoint } from './lib/checkpoints.js';
 import { findPausedHandoff, findPausedHandoffInSession, handoffPausedError, pausedHandoff } from './lib/handoff.js';
-import { resolveRefTarget, validateSecretTarget } from './lib/frame-targets.js';
+import { resolveRefTarget, targetFrameOrigin, validateSecretTarget } from './lib/frame-targets.js';
 import { SessionReservationRegistry } from './lib/session-reservations.js';
 import { resolveUploadPaths } from './lib/upload-paths.js';
 import { writeOutputFile } from './lib/file-output.js';
@@ -49,6 +49,12 @@ import { prepareExternalCamoufoxExecutable } from './lib/camoufox-executable.js'
 import { humanizedClick, humanizedOptions, humanizedScroll, humanizedType } from './lib/humanized-input.js';
 import { coerceHandsSteps, HandsError, computeHandBudgetMs } from './lib/hands.js';
 import { approvalRequiredResponse, classifyDangerousAction, normalizeActionLabel } from './lib/dangerous-actions.js';
+import {
+  checkSessionPolicy,
+  normalizeSessionPolicy,
+  originFromUrl,
+  sessionPolicyViolationError,
+} from './lib/session-policy.js';
 import { behaviorReport, createBehaviorTracker, recordBehaviorEvent } from './lib/behavior.js';
 import { applyFingerprintCoherence } from './lib/fingerprint.js';
 import tui from './lib/tui.js';
@@ -113,6 +119,7 @@ const pluginEvents = createPluginEvents();
 
 // --- Shared auth middleware ---
 const authMiddleware = () => requireAuth(CONFIG);
+const operatorAuthMiddleware = () => requireApiKey(CONFIG);
 
 const {
   requestsTotal, requestDuration, pageLoadDuration, snapshotBytes,
@@ -120,6 +127,7 @@ const {
   tabLockTimeoutsTotal,
   failuresTotal, browserRestartsTotal, tabsDestroyedTotal,
   sessionsExpiredTotal, tabsReapedTotal, tabsRecycledTotal,
+  policyViolationsTotal,
 } = await initMetrics({ enabled: CONFIG.prometheusEnabled });
 
 // --- Structured logging ---
@@ -196,6 +204,18 @@ app.use('/tabs/:tabId', fly.replayMiddleware(log));
 // so each key gates a distinct surface. When unset, behavior is unchanged.
 app.use(accessKeyMiddleware(CONFIG));
 
+// Session policy enforcement is centralized so legacy and native tab routes
+// cannot drift apart. Target-frame and dangerous-category checks are repeated
+// at the resolved action choke points below.
+app.use((req, res, next) => {
+  try {
+    enforceRequestSessionPolicy(req);
+    next();
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
 const ALLOWED_URL_SCHEMES = ['http:', 'https:'];
 
 // Interactive roles to include - exclude combobox to avoid opening complex widgets
@@ -251,6 +271,12 @@ function sendError(res, err, extraFields = {}) {
     body.ref = err.ref;
   }
   if (err.code) body.code = err.code;
+  if (err.code === 'policy_violation') {
+    body.action = err.action;
+    body.origin = err.origin;
+    body.category = err.category;
+    body.reason = err.reason;
+  }
   if (err.handoff) body.handoff = err.handoff;
   // Report unexpected 500s to Sentry (skip intentional admission-control 503s)
   if (status >= 500 && !err.statusCode) {
@@ -274,6 +300,196 @@ function validateUrl(url) {
   } catch {
     return `Invalid URL: ${url}`;
   }
+}
+
+function policyForUser(userId, session = null) {
+  const key = normalizeUserId(userId);
+  return sessionPolicies.get(key) || session?.policy || null;
+}
+
+function recordSessionPolicyViolation({ userId, tabId = null, decision }) {
+  const payload = {
+    userId: normalizeUserId(userId),
+    tabId,
+    action: decision.action || 'unknown',
+    origin: decision.origin || null,
+    category: decision.category || 'policy',
+    reason: decision.reason || 'denied',
+  };
+  policyViolationsTotal.labels(payload.action, payload.category).inc();
+  pluginEvents.emit('session:policy:violation', payload);
+  log('warn', 'session policy violation', payload);
+}
+
+function assertSessionPolicy({ userId, session = null, tabId = null, action, origin, dangerousCategory, enforceOrigin = true }) {
+  const policy = policyForUser(userId, session);
+  const decision = checkSessionPolicy(policy, { action, origin, dangerousCategory, enforceOrigin });
+  if (decision.allowed) return decision;
+  recordSessionPolicyViolation({ userId, tabId, decision });
+  throw sessionPolicyViolationError(decision);
+}
+
+function canonicalPolicyAction(action) {
+  const normalized = String(action || '').trim().toLowerCase();
+  if (normalized === 'type_secret') return 'type';
+  if (normalized === 'scrollintoview') return 'scroll';
+  if (normalized === 'select_option') return 'select';
+  if (normalized === 'uncheck') return 'check';
+  return normalized;
+}
+
+function assertSemanticActionPolicy({ userId, session, tabId, action, node, snapshot }) {
+  const frameUrl = node?.provenance?.frame?.url || snapshot?.url || null;
+  const origin = originFromUrl(frameUrl);
+  let dangerous = null;
+  if (action?.kind === 'click') {
+    dangerous = classifyDangerousAction({ kind: 'click', element: node?.name, role: node?.role, url: frameUrl });
+  } else if (action?.kind === 'press' && isEnterKey(action?.key)) {
+    dangerous = classifyDangerousAction({ kind: 'submit', element: node?.name, role: node?.role, url: frameUrl });
+  }
+  assertSessionPolicy({
+    userId,
+    session,
+    tabId,
+    action: canonicalPolicyAction(action?.kind),
+    origin,
+    dangerousCategory: dangerous?.category,
+  });
+}
+
+function requestTabTarget(req) {
+  const native = req.path.match(/^\/tabs\/([^/]+)(?:\/(.*))?$/);
+  if (native && native[1] !== 'open' && native[1] !== 'group') {
+    return { tabId: native[1], operation: native[2] || '' };
+  }
+  const targetId = req.body?.targetId || req.query?.targetId;
+  return targetId ? { tabId: String(targetId), operation: null } : null;
+}
+
+function originForTabTarget(tabState, ref = null) {
+  if (ref) {
+    const target = resolveRefTarget(tabState.page, ref, tabState.refs);
+    if (target.ok) return targetFrameOrigin(target);
+    return null;
+  }
+  try { return originFromUrl(tabState.page.url()); } catch { return null; }
+}
+
+function enforceRequestSessionPolicy(req) {
+  const userId = req.body?.userId ?? req.query?.userId;
+  if (userId === undefined || userId === null || !policyForUser(userId, sessions.get(normalizeUserId(userId)))) return;
+  const key = normalizeUserId(userId);
+  const session = sessions.get(key) || null;
+
+  const check = (action, { tabId = null, origin = null, enforceOrigin = true } = {}) => {
+    if (!action) return;
+    assertSessionPolicy({ userId: key, session, tabId, action: canonicalPolicyAction(action), origin, enforceOrigin });
+  };
+
+  if (req.path === '/tabs' && req.method === 'GET') {
+    check('list_tabs', { enforceOrigin: false });
+    return;
+  }
+  if ((req.path === '/tabs' || req.path === '/tabs/open') && req.method === 'POST') {
+    check('create_tab', { enforceOrigin: false });
+    if (req.body?.url) check('navigate', { origin: req.body.url });
+    return;
+  }
+  if (req.path.startsWith('/tabs/group/') && req.method === 'DELETE') {
+    check('close_tab', { enforceOrigin: false });
+    return;
+  }
+
+  if (req.path === '/navigate') {
+    check('navigate', { tabId: req.body?.targetId, origin: req.body?.url });
+    return;
+  }
+  if (req.path === '/snapshot') {
+    const found = session && findTab(session, req.query?.targetId);
+    if (found) check('snapshot', { tabId: req.query.targetId, origin: originForTabTarget(found.tabState) });
+    return;
+  }
+  if (req.path === '/act') {
+    const found = session && findTab(session, req.body?.targetId);
+    if (found) {
+      check(req.body?.kind, {
+        tabId: req.body.targetId,
+        origin: originForTabTarget(found.tabState, req.body?.ref),
+      });
+    }
+    return;
+  }
+
+  const target = requestTabTarget(req);
+  if (!target) {
+    return;
+  }
+
+  const found = session && findTab(session, target.tabId);
+  if (!found) return;
+  const { tabState } = found;
+  const currentOrigin = originForTabTarget(tabState);
+  const targetOrigin = originForTabTarget(tabState, req.body?.ref);
+  const operation = target.operation || '';
+
+  if (!operation && req.method === 'DELETE') {
+    check('close_tab', { tabId: target.tabId, enforceOrigin: false });
+    return;
+  }
+  if (operation === 'actions/plan' || operation === 'actions/execute') return;
+  if (operation === 'hands') {
+    for (const step of Array.isArray(req.body?.steps) ? req.body.steps : []) {
+      check(step?.action, { tabId: target.tabId, origin: originForTabTarget(tabState, step?.ref) });
+    }
+    return;
+  }
+  if (operation === 'navigate') {
+    if (req.body?.url) check('navigate', { tabId: target.tabId, origin: req.body.url });
+    return;
+  }
+  if (operation === 'back' || operation === 'forward') {
+    check('navigate', { tabId: target.tabId, origin: null });
+    return;
+  }
+  if (operation === 'refresh') {
+    check('navigate', { tabId: target.tabId, origin: currentOrigin });
+    return;
+  }
+
+  const operationActions = {
+    snapshot: 'snapshot', observe: 'observe', events: 'events', handoff: 'handoff', workflow: 'workflow',
+    wait: 'wait', click: 'click', upload: 'upload', type: 'type', press: 'press', scroll: 'scroll',
+    behavior: 'behavior', viewport: 'viewport', links: 'links', downloads: 'downloads', images: 'images',
+    screenshot: 'screenshot', stats: 'stats', evaluate: 'evaluate', extract: 'extract',
+  };
+  const action = operationActions[operation];
+  if (action) {
+    check(action, { tabId: target.tabId, origin: req.body?.ref ? targetOrigin : currentOrigin });
+  } else if (operation) {
+    // Unknown plugin tab routes still inherit origin confinement. Their action
+    // name remains default-allow unless core adds it to the validated schema.
+    check(operation.replace(/[^a-z0-9]+/gi, '_'), { tabId: target.tabId, origin: currentOrigin });
+  }
+}
+
+async function installSessionPolicyNavigationGuard(context, userId) {
+  if (typeof context?.route !== 'function') return;
+  await context.route('**/*', async route => {
+    const request = route.request();
+    if (!request.isNavigationRequest()) return route.continue();
+    const policy = policyForUser(userId);
+    const decision = checkSessionPolicy(policy, { action: 'navigate', origin: request.url() });
+    if (decision.allowed) return route.continue();
+    recordSessionPolicyViolation({ userId, decision });
+    const key = normalizeUserId(userId);
+    const record = { decision, at: Date.now() };
+    recentPolicyNavigationViolations.set(key, record);
+    const expiry = setTimeout(() => {
+      if (recentPolicyNavigationViolations.get(key) === record) recentPolicyNavigationViolations.delete(key);
+    }, 5000);
+    expiry.unref();
+    return route.abort('blockedbyclient');
+  });
 }
 
 // isLoopbackAddress -- now imported from lib/auth.js (see top of file)
@@ -423,6 +639,10 @@ let _lastBrowserRestartAt = 0; // Timestamp of last browser relaunch (for stale 
 // TabState = { page, refs: Map<refId, {role, name, nth}>, visitedUrls: Set, downloads: Array, toolCalls: number }
 // Note: sessionKey was previously called listItemId - both are accepted for backward compatibility
 const sessions = new Map();
+// Runtime-only operator policy registry. Policies survive browser-session
+// teardown during this process so recreating an identity cannot drop its lane.
+const sessionPolicies = new Map();
+const recentPolicyNavigationViolations = new Map();
 
 const SESSION_TIMEOUT_MS = CONFIG.sessionTimeoutMs;
 const MAX_SNAPSHOT_NODES = 500;
@@ -1366,6 +1586,7 @@ async function getSession(userId, { trace = false, storageState = null, reservat
       }
       await pluginEvents.emitAsync('session:creating', { userId: key, contextOptions });
       const context = await b.newContext(contextOptions);
+      await installSessionPolicyNavigationGuard(context, key);
       await applyFingerprintCoherence(context);
 
       let tracePath = null;
@@ -1385,6 +1606,7 @@ async function getSession(userId, { trace = false, storageState = null, reservat
         context,
         tabGroups: new Map(),
         secrets: new Map(),
+        policy: sessionPolicies.get(key) || null,
         lastAccess: Date.now(),
         activeOperations: 0,
         proxySessionId: sessionProxy?.sessionId || null,
@@ -1445,6 +1667,14 @@ function isProxyError(err) {
 }
 
 function handleRouteError(err, req, res, extraFields = {}) {
+  const policyUserId = req.body?.userId || req.query?.userId;
+  const recentPolicyViolation = policyUserId && recentPolicyNavigationViolations.get(normalizeUserId(policyUserId));
+  if (recentPolicyViolation
+      && Date.now() - recentPolicyViolation.at < 5000
+      && /ERR_BLOCKED_BY_CLIENT|blockedbyclient/i.test(String(err?.message || ''))) {
+    recentPolicyNavigationViolations.delete(normalizeUserId(policyUserId));
+    return sendError(res, sessionPolicyViolationError(recentPolicyViolation.decision), extraFields);
+  }
   const failureType = classifyError(err);
   const action = actionFromReq(req);
   failuresTotal.labels(failureType, action).inc();
@@ -3008,6 +3238,7 @@ app.post('/tabs/:tabId/navigate', async (req, res) => {
       
       const urlErr = validateUrl(targetUrl);
       if (urlErr) throw new Error(urlErr);
+      assertSessionPolicy({ userId, session, tabId, action: 'navigate', origin: targetUrl });
       
       return await withTabMutationLock(tabId, tabState, async () => {
         const currentSessionKey = found?.listItemId || resolvedSessionKey;
@@ -3562,6 +3793,7 @@ app.post('/tabs/:tabId/actions/plan', express.json({ limit: '256kb' }), async (r
     }
     const node = snapshot.nodes.find(item => item.id === action.nodeId);
     if (!node) return res.status(404).json({ error: 'semantic target not found' });
+    assertSemanticActionPolicy({ userId, session, tabId: req.params.tabId, action, node, snapshot });
     const contract = planAction({ action, node, snapshot, policy });
     found.tabState.actionContracts.set(contract.contractId, contract);
     res.json(contract);
@@ -3660,6 +3892,14 @@ app.post('/tabs/:tabId/actions/execute', express.json({ limit: '256kb' }), async
         if (freshFrame?.key !== contract.target.frameKey || freshFrame?.url !== contract.target.frameUrl) {
           return { ok: false, status: 'rejected_stale', reasons: ['target_frame_changed'], snapshot: freshSnapshot };
         }
+        assertSemanticActionPolicy({
+          userId,
+          session,
+          tabId: req.params.tabId,
+          action: contract.action,
+          node: freshNode,
+          snapshot: freshSnapshot,
+        });
         const ref = freshNode.ref;
         const target = ref ? resolveRefTarget(tabState.page, ref, tabState.refs) : { ok: false, reason: 'ref_not_found' };
         if (!target.ok) return { ok: false, status: 'rejected_stale', reasons: [target.reason || 'target_not_resolvable'] };
@@ -4011,7 +4251,7 @@ app.post('/tabs/:tabId/click', async (req, res) => {
       }
 
       // Brake: refuse clicks on send/pay/publish/delete/sign/confirm controls unless confirmed.
-      const guard = await guardDangerousAction(tabState, { kind: 'click', ref, selector, confirm: req.body.confirm, locator: clickTarget });
+      const guard = await guardDangerousAction(tabState, { kind: 'click', ref, selector, confirm: req.body.confirm, locator: clickTarget, userId, tabId });
       if (guard.decision === 'approval_required') return { approvalRequired: guard.dangerous };
       dangerousAnnotation = guard.dangerous;
 
@@ -4387,6 +4627,7 @@ app.post('/tabs/:tabId/type', async (req, res) => {
         const guard = await guardDangerousAction(tabState, {
           kind: 'type_submit', ref, selector, confirm: req.body.confirm, submitContext: true,
           locator: locator || (selector ? tabState.page.locator(selector) : null),
+          userId, tabId,
         });
         if (guard.decision === 'approval_required') return { approvalRequired: guard.dangerous };
         dangerousAnnotation = guard.dangerous;
@@ -4525,7 +4766,7 @@ app.post('/tabs/:tabId/press', async (req, res) => {
     const pressOutcome = await withTabMutationLock(tabId, tabState, async () => {
       // Brake: Enter submits whatever is focused, so it is judged like a submit.
       if (isEnterKey(key)) {
-        const guard = await guardDangerousAction(tabState, { kind: 'submit', confirm: req.body.confirm, submitContext: true });
+        const guard = await guardDangerousAction(tabState, { kind: 'submit', confirm: req.body.confirm, submitContext: true, userId, tabId: req.params.tabId });
         if (guard.decision === 'approval_required') return { approvalRequired: guard.dangerous };
         dangerousAnnotation = guard.dangerous;
       }
@@ -4724,9 +4965,11 @@ function approvalKey(dangerous, fallbackElement) {
  *
  * @returns {Promise<{decision:'allow'|'approval_required'|'annotate', dangerous:object|null}>}
  */
-async function guardDangerousAction(tabState, { kind, ref, selector, locator, confirm = false, submitContext = false }) {
+async function guardDangerousAction(tabState, { kind, ref, selector, locator, confirm = false, submitContext = false, userId, tabId }) {
   const mode = dangerousActionsMode();
-  if (mode === 'off') return { decision: 'allow', dangerous: null };
+  const policy = policyForUser(userId);
+  const hasDangerousPolicyDenies = Object.values(policy?.dangerousActions || {}).includes('deny');
+  if (mode === 'off' && !hasDangerousPolicyDenies) return { decision: 'allow', dangerous: null };
   let element = '';
   let role = null;
   let formAction = '';
@@ -4772,6 +5015,20 @@ async function guardDangerousAction(tabState, { kind, ref, selector, locator, co
   try { url = tabState.page.url(); } catch {}
   const dangerous = classifyDangerousAction({ kind, element, candidates, role, url, formAction, unresolved });
   if (!dangerous) return { decision: 'allow', dangerous: null };
+
+  let policyOrigin = originFromUrl(url);
+  if (ref) {
+    const target = resolveRefTarget(tabState.page, ref, tabState.refs);
+    policyOrigin = target.ok ? targetFrameOrigin(target) : null;
+  }
+  assertSessionPolicy({
+    userId,
+    tabId,
+    action: canonicalPolicyAction(kind),
+    origin: policyOrigin,
+    dangerousCategory: dangerous.category,
+  });
+  if (mode === 'off') return { decision: 'allow', dangerous: null };
 
   const key = approvalKey(dangerous, ref || selector);
   let decision = 'approval_required';
@@ -4959,25 +5216,25 @@ async function handsSubmit(tabState, step, inputConfig, preResolved = null) {
  * resolved locator is returned so execution targets exactly the element the
  * brake judged.
  */
-async function guardHandStep(tabState, step) {
+async function guardHandStep(tabState, step, { userId, tabId }) {
   const confirm = step.confirm === true;
   const hasTarget = Boolean(step.ref || step.selector);
   if (step.action === 'click') {
     const locator = await resolveHandLocator(tabState, step);
-    return { ...(await guardDangerousAction(tabState, { kind: 'click', ref: step.ref, selector: step.selector, locator, confirm })), locator };
+    return { ...(await guardDangerousAction(tabState, { kind: 'click', ref: step.ref, selector: step.selector, locator, confirm, userId, tabId })), locator };
   }
   if (step.action === 'submit') {
     const locator = hasTarget ? await resolveHandLocator(tabState, step) : null;
     // Targeted or not, a submit is judged by the control's own name and its form.
-    const guard = await guardDangerousAction(tabState, { kind: 'submit', ref: step.ref, selector: step.selector, locator, confirm, submitContext: true });
+    const guard = await guardDangerousAction(tabState, { kind: 'submit', ref: step.ref, selector: step.selector, locator, confirm, submitContext: true, userId, tabId });
     return { ...guard, locator };
   }
   if (step.action === 'type' && (step.submit || step.pressEnter)) {
     const locator = (step.mode !== 'keyboard' || hasTarget) ? await resolveHandLocator(tabState, step) : null;
-    return { ...(await guardDangerousAction(tabState, { kind: 'type_submit', ref: step.ref, selector: step.selector, locator, confirm, submitContext: true })), locator };
+    return { ...(await guardDangerousAction(tabState, { kind: 'type_submit', ref: step.ref, selector: step.selector, locator, confirm, submitContext: true, userId, tabId })), locator };
   }
   if (step.action === 'press' && isEnterKey(step.key)) {
-    return { ...(await guardDangerousAction(tabState, { kind: 'submit', confirm, submitContext: true })), locator: null };
+    return { ...(await guardDangerousAction(tabState, { kind: 'submit', confirm, submitContext: true, userId, tabId })), locator: null };
   }
   return { decision: 'allow', dangerous: null, locator: null };
 }
@@ -5182,7 +5439,7 @@ app.post('/tabs/:tabId/hands', async (req, res) => {
         }
         const step = steps[i];
         try {
-          const guard = await guardHandStep(tabState, step);
+          const guard = await guardHandStep(tabState, step, { userId, tabId });
           if (guard.decision === 'approval_required') {
             approvalRequired = guard.dangerous;
             // Keep `action` as the step's action name (results[] contract); the
@@ -5202,6 +5459,7 @@ app.post('/tabs/:tabId/hands', async (req, res) => {
             tabState.refs = new Map();
           }
         } catch (err) {
+          if (err?.code === 'policy_violation') throw err;
           results.push({ index: i, action: step.action, ok: false, error: safeError(err) });
           abortedAt = i;
           break;
@@ -6658,6 +6916,99 @@ app.post('/sessions/:userId/secrets', authMiddleware(), async (req, res) => {
 
 /**
  * @openapi
+ * /sessions/{userId}/policy:
+ *   get:
+ *     tags: [Sessions]
+ *     summary: Get the runtime capability policy for a session identity
+ *     description: Returns the operator-managed, runtime-only policy or null when unrestricted.
+ *     security:
+ *       - BearerAuth: []
+ *     parameters:
+ *       - name: userId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Current policy state.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 userId: { type: string }
+ *                 policy:
+ *                   allOf:
+ *                     - $ref: '#/components/schemas/SessionPolicy'
+ *                   nullable: true
+ *       403: { description: Dedicated operator authentication failed. }
+ *   post:
+ *     tags: [Sessions]
+ *     summary: Set or replace a runtime capability policy for a session identity
+ *     description: Works before the browser session exists. When GOLIATH_API_KEY is configured, only that dedicated key is accepted. The shared access key cannot administer policies.
+ *     security:
+ *       - BearerAuth: []
+ *     parameters:
+ *       - name: userId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/SessionPolicy'
+ *     responses:
+ *       200: { description: Policy set or replaced. }
+ *       400: { description: Invalid policy. }
+ *       403: { description: Dedicated operator authentication failed. }
+ *   delete:
+ *     tags: [Sessions]
+ *     summary: Remove a runtime capability policy from a session identity
+ *     description: Restores unrestricted behavior for the identity without deleting its browser session.
+ *     security:
+ *       - BearerAuth: []
+ *     parameters:
+ *       - name: userId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Policy removed. }
+ *       403: { description: Dedicated operator authentication failed. }
+ */
+app.get('/sessions/:userId/policy', operatorAuthMiddleware(), (req, res) => {
+  const userId = normalizeUserId(req.params.userId);
+  res.json({ userId, policy: sessionPolicies.get(userId) || null });
+});
+
+app.post('/sessions/:userId/policy', operatorAuthMiddleware(), (req, res) => {
+  try {
+    const userId = normalizeUserId(req.params.userId);
+    if (!userId || userId.length > 200) return res.status(400).json({ error: 'userId must be 1 to 200 characters' });
+    const policy = normalizeSessionPolicy(req.body);
+    sessionPolicies.set(userId, policy);
+    const session = sessions.get(userId);
+    if (session) session.policy = policy;
+    pluginEvents.emit('session:policy:updated', { userId, policy });
+    res.json({ ok: true, userId, policy });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+app.delete('/sessions/:userId/policy', operatorAuthMiddleware(), (req, res) => {
+  const userId = normalizeUserId(req.params.userId);
+  const removed = sessionPolicies.delete(userId);
+  const session = sessions.get(userId);
+  if (session) session.policy = null;
+  pluginEvents.emit('session:policy:cleared', { userId });
+  res.json({ ok: true, userId, removed });
+});
+
+/**
+ * @openapi
  * /sessions/{userId}/secrets/{secretId}:
  *   delete:
  *     tags: [Sessions]
@@ -7808,7 +8159,7 @@ app.post('/act', async (req, res) => {
           } else {
             actTarget = tabState.page.locator(selector);
           }
-          const guard = await guardDangerousAction(tabState, { kind: 'click', ref, selector, locator: actTarget, confirm: params.confirm });
+          const guard = await guardDangerousAction(tabState, { kind: 'click', ref, selector, locator: actTarget, confirm: params.confirm, userId, tabId: targetId });
           if (guard.decision === 'approval_required') return { approvalRequired: guard.dangerous, extra: { ref, selector } };
           await doClick(actTarget, true);
           
@@ -7844,6 +8195,7 @@ app.post('/act', async (req, res) => {
             const guard = await guardDangerousAction(tabState, {
               kind: 'type_submit', ref, selector, confirm: params.confirm, submitContext: true,
               locator: locator || (selector ? tabState.page.locator(selector) : null),
+              userId, tabId: targetId,
             });
             if (guard.decision === 'approval_required') return { approvalRequired: guard.dangerous, extra: { ref, selector } };
             actDangerous = guard.dangerous;
@@ -7872,7 +8224,7 @@ app.post('/act', async (req, res) => {
           if (!key) throw new Error('key is required');
           let pressDangerous = null;
           if (isEnterKey(key)) {
-            const guard = await guardDangerousAction(tabState, { kind: 'submit', confirm: params.confirm, submitContext: true });
+            const guard = await guardDangerousAction(tabState, { kind: 'submit', confirm: params.confirm, submitContext: true, userId, tabId: targetId });
             if (guard.decision === 'approval_required') return { approvalRequired: guard.dangerous, extra: { key } };
             pressDangerous = guard.dangerous;
           }
@@ -8252,6 +8604,7 @@ const __testing = CONFIG.nodeEnv === 'test' ? {
   closeReapableSession,
   withTabLock,
   withTabMutationLock,
+  installSessionPolicyNavigationGuard,
   pluginEvents,
   setBrowser(value) { browser = value; },
 } : null;

@@ -171,6 +171,344 @@
             "type": "string"
           }
         }
+      },
+      "SessionPolicy": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Optional runtime-only capability policy. Unset fields default to allow, and no registered policy preserves unrestricted behavior.",
+        "properties": {
+          "allowedOrigins": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "type": "string"
+            },
+            "description": "Exact HTTP(S) origins or scheme-pinned subdomain wildcards such as https://*.example.com."
+          },
+          "deniedOrigins": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "type": "string"
+            },
+            "description": "Origins denied before allowedOrigins is evaluated."
+          },
+          "actions": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "behavior": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ]
+              },
+              "check": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ]
+              },
+              "click": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ]
+              },
+              "close_tab": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ]
+              },
+              "create_tab": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ]
+              },
+              "downloads": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ]
+              },
+              "evaluate": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ]
+              },
+              "events": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ]
+              },
+              "extract": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ]
+              },
+              "handoff": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ]
+              },
+              "hover": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ]
+              },
+              "images": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ]
+              },
+              "links": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ]
+              },
+              "list_tabs": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ]
+              },
+              "navigate": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ]
+              },
+              "observe": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ]
+              },
+              "press": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ]
+              },
+              "screenshot": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ]
+              },
+              "scroll": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ]
+              },
+              "select": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ]
+              },
+              "semantic": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ]
+              },
+              "snapshot": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ]
+              },
+              "stats": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ]
+              },
+              "submit": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ]
+              },
+              "upload": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ]
+              },
+              "viewport": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ]
+              },
+              "wait": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ]
+              },
+              "workflow": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ]
+              }
+            },
+            "description": "Per-capability decisions. Unset capabilities default to allow."
+          },
+          "dangerousActions": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "change_password": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ]
+              },
+              "payment": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ]
+              },
+              "transfer": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ]
+              },
+              "sign": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ]
+              },
+              "delete": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ]
+              },
+              "send": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ]
+              },
+              "publish": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ]
+              },
+              "confirm": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ]
+              },
+              "unresolved_target": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ]
+              }
+            },
+            "description": "Hard denies by dangerous-action category. A deny cannot be overridden with confirm: true."
+          }
+        }
+      },
+      "PolicyViolation": {
+        "type": "object",
+        "required": [
+          "error",
+          "code",
+          "action",
+          "origin",
+          "category",
+          "reason"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string",
+            "enum": [
+              "policy_violation"
+            ]
+          },
+          "action": {
+            "type": "string"
+          },
+          "origin": {
+            "type": "string",
+            "nullable": true
+          },
+          "category": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
       }
     }
   },
@@ -3513,6 +3851,131 @@
           },
           "404": {
             "description": "Session not found."
+          }
+        }
+      }
+    },
+    "/sessions/{userId}/policy": {
+      "get": {
+        "tags": [
+          "Sessions"
+        ],
+        "summary": "Get the runtime capability policy for a session identity",
+        "description": "Returns the operator-managed, runtime-only policy or null when unrestricted.",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "userId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current policy state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "userId": {
+                      "type": "string"
+                    },
+                    "policy": {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/SessionPolicy"
+                        }
+                      ],
+                      "nullable": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Dedicated operator authentication failed."
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Sessions"
+        ],
+        "summary": "Set or replace a runtime capability policy for a session identity",
+        "description": "Works before the browser session exists. When GOLIATH_API_KEY is configured, only that dedicated key is accepted. The shared access key cannot administer policies.",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "userId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionPolicy"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Policy set or replaced."
+          },
+          "400": {
+            "description": "Invalid policy."
+          },
+          "403": {
+            "description": "Dedicated operator authentication failed."
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Sessions"
+        ],
+        "summary": "Remove a runtime capability policy from a session identity",
+        "description": "Restores unrestricted behavior for the identity without deleting its browser session.",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "userId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Policy removed."
+          },
+          "403": {
+            "description": "Dedicated operator authentication failed."
           }
         }
       }

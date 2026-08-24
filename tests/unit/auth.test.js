@@ -1,4 +1,4 @@
-import { accessKeyMiddleware, requireAuth } from '../../lib/auth.js';
+import { accessKeyMiddleware, requireApiKey, requireAuth } from '../../lib/auth.js';
 
 function invoke(config, { path = '/tabs', address = '127.0.0.1', token } = {}) {
   const req = {
@@ -80,5 +80,32 @@ describe('requireAuth', () => {
     });
 
     expect(result).toEqual({ next: true, status: 200 });
+  });
+});
+
+describe('requireApiKey', () => {
+  function invokeOperator(config, token, address = '127.0.0.1') {
+    const req = {
+      socket: { remoteAddress: address },
+      headers: token ? { authorization: `Bearer ${token}` } : {},
+    };
+    const result = { next: false, status: 200, body: null };
+    const res = {
+      status(code) { result.status = code; return this; },
+      json(body) { result.body = body; return this; },
+    };
+    requireApiKey(config)(req, res, () => { result.next = true; });
+    return result;
+  }
+
+  test('does not accept the shared access key when a dedicated API key exists', () => {
+    const config = { apiKey: 'operator', accessKey: 'agent' };
+    expect(invokeOperator(config, 'agent')).toMatchObject({ next: false, status: 403 });
+    expect(invokeOperator(config, 'operator')).toMatchObject({ next: true, status: 200 });
+  });
+
+  test('retains local and access-key behavior when no dedicated API key exists', () => {
+    expect(invokeOperator({ apiKey: '', accessKey: '' }, null)).toMatchObject({ next: true });
+    expect(invokeOperator({ apiKey: '', accessKey: 'agent' }, 'agent')).toMatchObject({ next: true });
   });
 });

@@ -274,6 +274,58 @@ name is allowed. The semantic `/actions/plan` + `/actions/execute` flow shares
 the same vocabulary (its risk is never lower than the brake's) and adds origin
 policies, prompt-injection signals, and postconditions.
 
+## Session capability policies
+
+Operators can optionally bind a browser identity to a runtime-only capability
+policy. With no registered policy, Goliath behaves exactly as before. Unset
+policy fields also default to allow, so operators can deny only the surfaces
+that matter for a particular identity.
+
+```bash
+curl -sS -X POST http://localhost:9377/sessions/agent-business/policy \
+  -H "Authorization: Bearer $GOLIATH_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "allowedOrigins":["https://github.com","https://*.github.com"],
+    "deniedOrigins":["https://billing.github.com"],
+    "actions":{"upload":"deny","evaluate":"deny","screenshot":"deny"},
+    "dangerousActions":{"payment":"deny","transfer":"deny","change_password":"deny"}
+  }'
+```
+
+Policies can be registered before the first tab is created. They remain in
+memory across browser-session teardown and recreation, but they are not written
+to the profile and do not survive a Goliath process restart. Use
+`GET /sessions/:userId/policy` to inspect a policy and
+`DELETE /sessions/:userId/policy` to restore unrestricted behavior.
+
+When `GOLIATH_API_KEY` is configured, policy administration requires that exact
+operator key. `GOLIATH_ACCESS_KEY` remains valid for ordinary agent requests but
+cannot set, replace, inspect, or remove policies. Without a dedicated API key,
+the existing access-key or loopback-only authentication behavior applies.
+
+Origin rules accept exact HTTP(S) origins and scheme-pinned, subdomain-only
+wildcards such as `https://*.example.com`. Wildcards do not match the apex
+origin. Denied origins take precedence, and opaque or unavailable frame origins
+fail closed whenever origin rules exist. Top-level and iframe navigation is also
+blocked at the browser request boundary. Browser back and forward operations
+are refused under an origin-scoped policy because their destination cannot be
+verified before navigation. Closing tabs remains available for cleanup unless
+`close_tab` is explicitly denied.
+
+Supported action keys are `behavior`, `check`, `click`, `close_tab`,
+`create_tab`, `downloads`, `evaluate`, `events`, `extract`, `handoff`, `hover`,
+`images`, `links`, `list_tabs`, `navigate`, `observe`, `press`, `screenshot`,
+`scroll`, `select`, `semantic`, `snapshot`, `stats`, `submit`, `type`, `upload`,
+`viewport`, `wait`, and `workflow`. Supported dangerous categories are
+`change_password`, `payment`, `transfer`, `sign`, `delete`, `send`, `publish`,
+`confirm`, and `unresolved_target`. A dangerous-category deny is a hard deny:
+`confirm: true` and `GOLIATH_DANGEROUS_ACTIONS=off` cannot override it.
+
+Violations return HTTP 403 with `code: "policy_violation"`, increment
+`goliath_policy_violations_total{action,category}`, and emit the
+`session:policy:violation` plugin event.
+
 ## MCP and plugins
 
 Bundled plugins provide YouTube transcript extraction, persistent session storage, and optional VNC access. Enable or configure them in `goliath.config.json`.
