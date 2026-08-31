@@ -472,6 +472,81 @@ function enforceRequestSessionPolicy(req) {
   }
 }
 
+const POLICY_REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+const POLICY_MAX_REDIRECT_HOPS = 10;
+
+/**
+ * Record a blocked navigation and abort it. The pending decision lets the
+ * request's own handler turn the resulting browser-level abort into a
+ * policy_violation response instead of an opaque navigation failure.
+ */
+function denyPolicyNavigation(route, { userId, decision }) {
+  recordSessionPolicyViolation({ userId, decision });
+  const key = normalizeUserId(userId);
+  const record = { decision, at: Date.now() };
+  recentPolicyNavigationViolations.set(key, record);
+  const expiry = setTimeout(() => {
+    if (recentPolicyNavigationViolations.get(key) === record) recentPolicyNavigationViolations.delete(key);
+  }, 5000);
+  expiry.unref();
+  return route.abort('blockedbyclient');
+}
+
+function hasOriginRules(policy) {
+  return (policy.allowedOrigins?.length || 0) > 0 || (policy.deniedOrigins?.length || 0) > 0;
+}
+
+/**
+ * Resolve a navigation's redirect chain hop by hop, refusing the first hop that
+ * the session policy denies. Returning the final response through fulfill()
+ * keeps the denied origin from ever receiving a request.
+ */
+async function followPolicyCheckedRedirects(route, { policy, userId }) {
+  let response;
+  try {
+    response = await route.fetch({ maxRedirects: 0 });
+  } catch (err) {
+    log('warn', 'policy redirect guard could not resolve navigation', { userId, error: err.message });
+    return route.abort('blockedbyclient');
+  }
+  for (let hop = 0; hop < POLICY_MAX_REDIRECT_HOPS; hop++) {
+    if (!POLICY_REDIRECT_STATUSES.has(response.status())) break;
+    const location = response.headers()?.location;
+    if (!location) break;
+    let next;
+    try {
+      next = new URL(location, response.url()).toString();
+    } catch {
+      break;
+    }
+    const decision = checkSessionPolicy(policy, { action: 'navigate', origin: next });
+    if (!decision.allowed) {
+      return denyPolicyNavigation(route, { userId, decision });
+    }
+    try {
+      response = await route.fetch({
+        url: next,
+        maxRedirects: 0,
+        ...(response.status() === 303 ? { method: 'GET' } : {}),
+      });
+    } catch (err) {
+      log('warn', 'policy redirect guard could not follow an allowed hop', { userId, error: err.message });
+      return route.abort('blockedbyclient');
+    }
+  }
+  return route.fulfill({ response });
+}
+
+/**
+ * Confine a session's navigations to its policy origins.
+ *
+ * The Playwright Firefox driver follows 3xx responses internally and does not
+ * re-invoke the route handler for the redirect target, so checking only the
+ * requested URL let an allowed origin bounce the browser onto a denied one --
+ * with that identity's cookies attached. When a session carries origin rules
+ * the guard therefore resolves redirect chains itself, checking every hop
+ * before the browser is allowed to see the response.
+ */
 async function installSessionPolicyNavigationGuard(context, userId) {
   if (typeof context?.route !== 'function') return;
   await context.route('**/*', async route => {
@@ -479,16 +554,10 @@ async function installSessionPolicyNavigationGuard(context, userId) {
     if (!request.isNavigationRequest()) return route.continue();
     const policy = policyForUser(userId);
     const decision = checkSessionPolicy(policy, { action: 'navigate', origin: request.url() });
-    if (decision.allowed) return route.continue();
-    recordSessionPolicyViolation({ userId, decision });
-    const key = normalizeUserId(userId);
-    const record = { decision, at: Date.now() };
-    recentPolicyNavigationViolations.set(key, record);
-    const expiry = setTimeout(() => {
-      if (recentPolicyNavigationViolations.get(key) === record) recentPolicyNavigationViolations.delete(key);
-    }, 5000);
-    expiry.unref();
-    return route.abort('blockedbyclient');
+    if (decision.allowed) return policy && hasOriginRules(policy)
+      ? followPolicyCheckedRedirects(route, { policy, userId })
+      : route.continue();
+    return denyPolicyNavigation(route, { userId, decision });
   });
 }
 
@@ -1671,7 +1740,7 @@ function handleRouteError(err, req, res, extraFields = {}) {
   const recentPolicyViolation = policyUserId && recentPolicyNavigationViolations.get(normalizeUserId(policyUserId));
   if (recentPolicyViolation
       && Date.now() - recentPolicyViolation.at < 5000
-      && /ERR_BLOCKED_BY_CLIENT|blockedbyclient/i.test(String(err?.message || ''))) {
+      && /ERR_BLOCKED_BY_CLIENT|blockedbyclient|NS_ERROR_FAILURE|NS_BINDING_ABORTED/i.test(String(err?.message || ''))) {
     recentPolicyNavigationViolations.delete(normalizeUserId(policyUserId));
     return sendError(res, sessionPolicyViolationError(recentPolicyViolation.decision), extraFields);
   }

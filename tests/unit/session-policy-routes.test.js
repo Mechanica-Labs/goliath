@@ -205,6 +205,66 @@ test('browser request interception blocks denied top-level and iframe navigation
   expect(intercepted.continue).not.toHaveBeenCalled();
 });
 
+test('redirect hops are policy-checked before the browser sees them', async () => {
+  await request('/sessions/redirects/policy', {
+    method: 'POST', body: { allowedOrigins: ['https://app.example.com'] },
+  });
+  let handler;
+  const context = { route: jest.fn(async (_pattern, routeHandler) => { handler = routeHandler; }) };
+  await __testing.installSessionPolicyNavigationGuard(context, 'redirects');
+
+  const makeResponse = (status, url, location) => ({
+    status: () => status,
+    url: () => url,
+    headers: () => (location ? { location } : {}),
+  });
+  const makeRoute = (responses) => ({
+    request: () => ({ isNavigationRequest: () => true, url: () => 'https://app.example.com/start' }),
+    fetch: jest.fn(async () => responses.shift()),
+    fulfill: jest.fn(async () => {}),
+    abort: jest.fn(async () => {}),
+    continue: jest.fn(async () => {}),
+  });
+
+  // A redirect onto a denied origin is refused before the hop is fetched.
+  const denied = makeRoute([
+    makeResponse(302, 'https://app.example.com/start', 'https://evil.example.com/landing'),
+  ]);
+  await handler(denied);
+  expect(denied.abort).toHaveBeenCalledWith('blockedbyclient');
+  expect(denied.fulfill).not.toHaveBeenCalled();
+  expect(denied.fetch).toHaveBeenCalledTimes(1);
+
+  // A redirect chain that stays inside the policy is followed and served.
+  const allowed = makeRoute([
+    makeResponse(302, 'https://app.example.com/start', '/next'),
+    makeResponse(200, 'https://app.example.com/next', null),
+  ]);
+  await handler(allowed);
+  expect(allowed.abort).not.toHaveBeenCalled();
+  expect(allowed.fulfill).toHaveBeenCalledTimes(1);
+  expect(allowed.fetch).toHaveBeenCalledTimes(2);
+});
+
+test('sessions without origin rules keep the untouched request path', async () => {
+  await request('/sessions/norules/policy', {
+    method: 'POST', body: { actions: { evaluate: 'deny' } },
+  });
+  let handler;
+  const context = { route: jest.fn(async (_pattern, routeHandler) => { handler = routeHandler; }) };
+  await __testing.installSessionPolicyNavigationGuard(context, 'norules');
+  const route = {
+    request: () => ({ isNavigationRequest: () => true, url: () => 'https://anywhere.example/page' }),
+    fetch: jest.fn(async () => { throw new Error('must not resolve redirects without origin rules'); }),
+    fulfill: jest.fn(async () => {}),
+    abort: jest.fn(async () => {}),
+    continue: jest.fn(async () => {}),
+  };
+  await handler(route);
+  expect(route.continue).toHaveBeenCalledTimes(1);
+  expect(route.fetch).not.toHaveBeenCalled();
+});
+
 test('dangerous category deny overrides confirm and the global brake mode', async () => {
   await request('/sessions/dangerous/policy', {
     method: 'POST', body: { dangerousActions: { payment: 'deny' } },
