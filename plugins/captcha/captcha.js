@@ -18,6 +18,28 @@ import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // relative to repo root (plugins/captcha/../../)
 const REPO_ROOT = path.join(__dirname, '..', '..');
+const MAX_CAPTCHA_INSTRUCTION_CHARS = 32_000;
+
+// A real CAPTCHA may ask a person to select images, tick a checkbox, or type
+// text from an image. It should never ask the operator to open a local command
+// runner, paste a command, or disclose a secret. ClickFix campaigns combine
+// those instructions to turn a "verification" prompt into local code
+// execution. Keep the detection deliberately conjunctive so normal challenge
+// copy is not treated as hostile.
+const SUSPICIOUS_CAPTCHA_INSTRUCTION_RULES = [
+  {
+    id: 'clickfix_command_execution',
+    pattern: /(?:press|hold|use|open|launch).{0,80}(?:windows?\s*(?:key)?\s*\+?\s*r|win\s*\+?\s*r|run dialog|terminal|powershell|command prompt|cmd(?:\.exe)?|shell).{0,180}(?:paste|ctrl\s*\+?\s*v|command|code)/i,
+  },
+  {
+    id: 'clickfix_paste_shortcut',
+    pattern: /(?:copy|copied).{0,120}(?:command|code|script).{0,180}(?:win(?:dows)?\s*(?:key)?\s*\+?\s*r|ctrl\s*\+?\s*v|paste|terminal|powershell|command prompt|cmd(?:\.exe)?|shell)/i,
+  },
+  {
+    id: 'credential_exfiltration',
+    pattern: /(?:copy|paste|send|upload|reveal|enter).{0,80}(?:password|passcode|secret|token|api\s*key|credential)/i,
+  },
+];
 
 // ---------------------------------------------------------------------------
 // Config (centralized env reads)
@@ -124,6 +146,22 @@ export async function detectCaptcha(page) {
     if (el.name) return `[name="${CSS.escape(el.name)}"]`;
     return el.tagName.toLowerCase();
   }
+}
+
+/**
+ * Return a stable reason when a purported CAPTCHA contains ClickFix-style
+ * instructions. This reads visible page text only; it never reads the
+ * clipboard, executes page-supplied text, or invokes a local command runner.
+ */
+export async function detectSuspiciousCaptchaInstructions(page) {
+  const text = await page.evaluate((maxChars) => String(document.body?.innerText || '')
+    .normalize('NFKC')
+    .replace(/\s+/g, ' ')
+    .slice(0, maxChars), MAX_CAPTCHA_INSTRUCTION_CHARS);
+  for (const rule of SUSPICIOUS_CAPTCHA_INSTRUCTION_RULES) {
+    if (rule.pattern.test(text)) return rule.id;
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -349,4 +387,10 @@ export async function solveTextCaptcha(page, detected) {
 export { runOcr };
 
 // Export helpers for tests
-export const __internals = { postJson, solve2captcha, solveCapsolver, detectCaptcha };
+export const __internals = {
+  postJson,
+  solve2captcha,
+  solveCapsolver,
+  detectCaptcha,
+  detectSuspiciousCaptchaInstructions,
+};

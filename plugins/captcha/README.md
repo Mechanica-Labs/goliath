@@ -59,6 +59,10 @@ Response:
 - Could not solve / provider errors — check `GOLIATH_CAPTCHA_KEY` and provider.
 - Anti-bot systems may still reject a session; Goliath does not guarantee CAPTCHA
   acceptance (see project DISCLOSURE).
+- **Suspicious CAPTCHA instructions** — Goliath refuses a solve when visible
+  challenge text asks an operator to open a terminal or Run dialog, paste a
+  command, or disclose credentials. Do not follow those instructions; close the
+  page and verify the site independently.
 
 ## Architecture
 
