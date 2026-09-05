@@ -21,6 +21,11 @@ test('MCP action, hand, and upload requests preserve the agent identity', () => 
     path: '/act',
     body: { targetId: 'tab/a', kind: 'press', key: 'Enter', userId: 'agent-1' },
   });
+  expect(buildRequest('goliath_act', { tabId: 'tab/a', kind: 'hold', ref: 'e1', holdMs: 1800 }, context)).toMatchObject({
+    method: 'POST',
+    path: '/act',
+    body: { targetId: 'tab/a', kind: 'hold', ref: 'e1', holdMs: 1800, userId: 'agent-1' },
+  });
   expect(buildRequest('goliath_upload', { tabId: 'tab/a', path: '/safe/file.pdf' }, context)).toMatchObject({
     method: 'POST',
     path: '/tabs/tab%2Fa/upload',

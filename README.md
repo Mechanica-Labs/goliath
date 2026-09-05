@@ -81,7 +81,7 @@ Background state is stored in `.goliath/` beside the installed package or checko
 Snapshots support `filter=interactive` (drops non-actionable text, keeps element refs, headings, iframe boundaries, and their tree ancestors — the response reports `fullChars` so the reduction is measurable) and `maxChars` (per-request window budget, paginated with `offset`).
 
 - Observe: accessibility snapshots, versioned semantic state, screenshots, links, images, structured extraction, downloads, and tab statistics.
-- Act: click, type, press keys, hover, scroll, wait, select options, drag and drop, navigate, resize the viewport, and attach files.
+- Act: click, type, press and hold, press keys, hover, scroll, wait, select options, drag and drop, navigate, resize the viewport, and attach files.
 - Remember: isolate state by `userId`, group tabs by `sessionKey`, restore browser profiles, and fork explicit storage checkpoints.
 - Hand off: enable the optional noVNC plugin when a human must complete MFA, OAuth consent, CAPTCHA, or another visual step.
 - Integrate: use standard MCP, the REST API, or the generated OpenAPI document.
@@ -173,10 +173,16 @@ Semantic safety is fail-closed at the browser boundary: contracts are tied to on
 
 Click, type, and scroll requests accept `"humanized": true`. The API then uses curved pointer trajectories, bounded jitter and hesitation, variable key timing, or eased wheel pulses instead of a single instant automation event. An object form can select the `fast`, `balanced`, or `deliberate` profile.
 
+Click also accepts `"holdMs"` (200 to 15000) for a sustained press-and-hold. That is an interaction primitive for buttons that fill while the pointer stays down. It is not proof that a third-party challenge will accept the session.
+
 ```bash
 curl -sS -X POST http://localhost:9377/tabs/TAB_ID/click \
   -H 'Content-Type: application/json' \
   -d '{"userId":"agent1","ref":"e1","humanized":{"profile":"balanced"}}'
+
+curl -sS -X POST http://localhost:9377/tabs/TAB_ID/click \
+  -H 'Content-Type: application/json' \
+  -d '{"userId":"agent1","ref":"e1","holdMs":1800,"humanized":true}'
 
 curl -sS 'http://localhost:9377/tabs/TAB_ID/behavior?userId=agent1'
 ```

@@ -46,7 +46,7 @@ import { createReporter, createTabHealthTracker, collectResourceSnapshot, classi
 import { mountDocs } from './lib/openapi.js';
 import { initSentry, captureException as sentryCaptureException, setupExpressErrorHandler as setupSentryErrorHandler, flush as sentryFlush } from './lib/sentry.js';
 import { prepareExternalCamoufoxExecutable } from './lib/camoufox-executable.js';
-import { humanizedClick, humanizedOptions, humanizedScroll, humanizedType } from './lib/humanized-input.js';
+import { humanizedClick, humanizedPressAndHold, humanizedOptions, humanizedScroll, humanizedType, parseHoldMs } from './lib/humanized-input.js';
 import { coerceHandsSteps, HandsError, computeHandBudgetMs } from './lib/hands.js';
 import { approvalRequiredResponse, classifyDangerousAction, normalizeActionLabel } from './lib/dangerous-actions.js';
 import {
@@ -4074,6 +4074,11 @@ app.post('/tabs/:tabId/wait', async (req, res) => {
  *                 description: CSS selector fallback.
  *               doubleClick:
  *                 type: boolean
+ *               holdMs:
+ *                 type: number
+ *                 minimum: 200
+ *                 maximum: 15000
+ *                 description: Sustained pointer-down duration in milliseconds. Explicitly enables press-and-hold instead of a tap.
  *               humanized:
  *                 description: Use curved pointer motion, hesitation, micro-movements, and variable click timing.
  *                 oneOf:
@@ -4130,6 +4135,15 @@ app.post('/tabs/:tabId/click', async (req, res) => {
   
   try {
     const { userId, ref, selector, doubleClick = false } = req.body;
+    let holdMs;
+    try {
+      holdMs = parseHoldMs(req.body.holdMs);
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
+    if (holdMs !== undefined && doubleClick) {
+      return res.status(400).json({ error: 'holdMs cannot be combined with doubleClick' });
+    }
     const inputConfig = humanizedOptions(req.body.humanized);
     if (!userId) return res.status(400).json({ error: 'userId required' });
     const session = sessions.get(normalizeUserId(userId));
@@ -4176,6 +4190,15 @@ app.post('/tabs/:tabId/click', async (req, res) => {
       
       const doClick = async (locatorOrSelector, isLocator) => {
         const locator = isLocator ? locatorOrSelector : tabState.page.locator(locatorOrSelector);
+
+        if (holdMs !== undefined) {
+          inputResult = await humanizedPressAndHold(tabState.page, locator, tabState, {
+            holdMs,
+            profile: inputConfig.profile,
+            record: (type, detail) => recordBehaviorEvent(tabState.behavior, type, detail),
+          });
+          return;
+        }
 
         if (inputConfig.enabled) {
           inputResult = await humanizedClick(tabState.page, locator, tabState, {
@@ -8050,7 +8073,7 @@ app.get('/snapshot', async (req, res) => {
  *                 type: string
  *               kind:
  *                 type: string
- *                 description: 'Action kind: click, type, scroll, scrollIntoView, press, select_option, drag, hover, wait, or close.'
+ *                 description: 'Action kind: click, type, scroll, scrollIntoView, press, hold, select_option, drag, hover, wait, or close.'
  *               targetId:
  *                 type: string
  *               ref:
@@ -8061,6 +8084,12 @@ app.get('/snapshot', async (req, res) => {
  *                 type: string
  *               key:
  *                 type: string
+ *               holdMs:
+ *                 type: number
+ *                 minimum: 200
+ *                 maximum: 15000
+ *               timeMs:
+ *                 type: number
  *               direction:
  *                 type: string
  *               value:
@@ -8124,6 +8153,45 @@ app.post('/act', async (req, res) => {
     
     const result = await withTabMutationLock(targetId, tabState, async () => {
       switch (kind) {
+        case 'hold': {
+          const holdMs = parseHoldMs(params.holdMs ?? params.timeMs);
+          if (holdMs === undefined) {
+            const error = new Error('holdMs or timeMs is required');
+            error.statusCode = 400;
+            throw error;
+          }
+          const { ref, selector } = params;
+          if (!ref && !selector) {
+            throw new Error('ref or selector required');
+          }
+          let holdTarget;
+          if (ref) {
+            let locator = refToLocator(tabState.page, ref, tabState.refs);
+            if (!locator) {
+              log('info', 'auto-refreshing refs before hold (openclaw)', { ref, hadRefs: tabState.refs.size });
+              tabState.refs = await buildRefs(tabState.page);
+              locator = refToLocator(tabState.page, ref, tabState.refs);
+            }
+            if (!locator) {
+              const maxRef = tabState.refs.size > 0 ? `e${tabState.refs.size}` : 'none';
+              throw new StaleRefsError(ref, maxRef, tabState.refs.size);
+            }
+            holdTarget = locator;
+          } else {
+            holdTarget = tabState.page.locator(selector);
+          }
+          const holdGuard = await guardDangerousAction(tabState, { kind: 'click', ref, selector, locator: holdTarget, confirm: params.confirm, userId, tabId: targetId });
+          if (holdGuard.decision === 'approval_required') return { approvalRequired: holdGuard.dangerous, extra: { ref, selector } };
+          await humanizedPressAndHold(tabState.page, holdTarget, tabState, {
+            holdMs,
+            profile: 'fast',
+            record: (type, detail) => recordBehaviorEvent(tabState.behavior, type, detail),
+          });
+          await tabState.page.waitForTimeout(500);
+          tabState.refs = await buildRefs(tabState.page);
+          return { ok: true, targetId, url: tabState.page.url(), holdMs, ...(holdGuard.dangerous ? { dangerous: holdGuard.dangerous } : {}) };
+        }
+
         case 'click': {
           const { ref, selector, doubleClick } = params;
           if (!ref && !selector) {
@@ -8133,6 +8201,15 @@ app.post('/act', async (req, res) => {
           
           const doClick = async (locatorOrSelector, isLocator) => {
             const locator = isLocator ? locatorOrSelector : tabState.page.locator(locatorOrSelector);
+            const clickHoldMs = parseHoldMs(params.holdMs);
+            if (clickHoldMs !== undefined) {
+              await humanizedPressAndHold(tabState.page, locator, tabState, {
+                holdMs: clickHoldMs,
+                profile: 'fast',
+                record: (type, detail) => recordBehaviorEvent(tabState.behavior, type, detail),
+              });
+              return;
+            }
             const clickOpts = { timeout: 3000 };
             if (doubleClick) clickOpts.clickCount = 2;
             

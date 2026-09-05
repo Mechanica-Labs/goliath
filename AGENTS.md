@@ -57,6 +57,9 @@ POST /tabs/:tabId/click
 {"userId": "agent1", "ref": "e1"}
 # Or CSS selector:
 {"userId": "agent1", "selector": "button.submit"}
+# Sustained press-and-hold (200-15000 ms). A normal click is too short for
+# progress-capsule buttons such as Microsoft account "Press and hold".
+{"userId": "agent1", "ref": "e1", "holdMs": 1800, "humanized": true}
 ```
 
 ### Type Text
