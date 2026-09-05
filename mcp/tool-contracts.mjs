@@ -167,13 +167,14 @@ export const TOOL_DEFS = [
   },
   {
     name: 'goliath_click',
-    description: 'Click an element by snapshot ref or CSS selector. Clicking a control that sends, pays, publishes, deletes, signs, confirms, or transfers returns status approval_required until the call is repeated with confirm: true.',
+    description: 'Click an element by snapshot ref or CSS selector. Set holdMs for a sustained press-and-hold instead of a tap. Clicking a control that sends, pays, publishes, deletes, signs, confirms, or transfers returns status approval_required until the call is repeated with confirm: true.',
     inputSchema: {
       type: 'object',
       properties: {
         tabId: { type: 'string' },
         ref: { type: 'string', description: 'Element ref from the latest snapshot' },
         selector: { type: 'string', description: 'CSS selector alternative to ref' },
+        holdMs: { type: 'number', minimum: 200, maximum: 15000, description: 'Hold the pointer down for this many milliseconds' },
         humanized: HUMANIZED_INPUT_SCHEMA,
         confirm: { type: 'boolean', description: 'Set true only after the user approved a dangerous action (send, pay, publish, delete, sign, confirm, transfer, change password). Without it such actions return status approval_required instead of executing.' },
       },
@@ -299,16 +300,17 @@ export const TOOL_DEFS = [
   {
     name: 'goliath_act',
     description:
-      'Perform the human interactions needed for complex forms and document workflows: press keys, hover, wait, reveal an element, select options, or drag and drop.',
+      'Perform the human interactions needed for complex forms and document workflows: press and hold, press keys, hover, wait, reveal an element, select options, or drag and drop.',
     inputSchema: {
       type: 'object',
       properties: {
         tabId: { type: 'string' },
-        kind: { type: 'string', enum: ['press', 'hover', 'wait', 'scrollIntoView', 'select_option', 'drag'] },
+        kind: { type: 'string', enum: ['hold', 'press', 'hover', 'wait', 'scrollIntoView', 'select_option', 'drag'] },
         ref: { type: 'string' },
         selector: { type: 'string' },
         key: { type: 'string', description: 'For press, e.g. Enter or Control+A' },
         timeMs: { type: 'number', minimum: 0, maximum: 30000 },
+        holdMs: { type: 'number', minimum: 200, maximum: 15000, description: 'For hold, 200 to 15000 ms' },
         text: { type: 'string', description: 'Visible text to wait for' },
         loadState: { type: 'string', enum: ['load', 'domcontentloaded', 'networkidle'] },
         value: { type: 'string', description: 'Single option value for select_option' },

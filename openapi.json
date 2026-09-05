@@ -1731,6 +1731,12 @@
                   "doubleClick": {
                     "type": "boolean"
                   },
+                  "holdMs": {
+                    "type": "number",
+                    "minimum": 200,
+                    "maximum": 15000,
+                    "description": "Sustained pointer-down duration in milliseconds. Explicitly enables press-and-hold instead of a tap."
+                  },
                   "humanized": {
                     "description": "Use curved pointer motion, hesitation, micro-movements, and variable click timing.",
                     "oneOf": [
@@ -4587,7 +4593,7 @@
                   },
                   "kind": {
                     "type": "string",
-                    "description": "Action kind: click, type, scroll, scrollIntoView, press, select_option, drag, hover, wait, or close."
+                    "description": "Action kind: click, type, scroll, scrollIntoView, press, hold, select_option, drag, hover, wait, or close."
                   },
                   "targetId": {
                     "type": "string"
@@ -4603,6 +4609,14 @@
                   },
                   "key": {
                     "type": "string"
+                  },
+                  "holdMs": {
+                    "type": "number",
+                    "minimum": 200,
+                    "maximum": 15000
+                  },
+                  "timeMs": {
+                    "type": "number"
                   },
                   "direction": {
                     "type": "string"

@@ -338,13 +338,14 @@ export default function register(api) {
     }));
     api.registerTool((ctx) => ({
         name: "goliath_click",
-        description: "Click an element in a Goliath tab by ref (e.g., e1) or CSS selector, optionally with humanized pointer motion.",
+        description: "Click an element in a Goliath tab by ref (e.g., e1) or CSS selector, optionally with humanized pointer motion. Set holdMs for a sustained press-and-hold.",
         parameters: {
             type: "object",
             properties: {
                 tabId: { type: "string", description: "Tab identifier" },
                 ref: { type: "string", description: "Element ref from snapshot (e.g., e1)" },
                 selector: { type: "string", description: "CSS selector (alternative to ref)" },
+                holdMs: { type: "number", minimum: 200, maximum: 15000, description: "Hold the pointer down for this many milliseconds instead of tapping" },
                 humanized: { type: "boolean", description: "Use curved pointer motion, hesitation, and variable click timing" },
                 confirm: { type: "boolean", description: "Set true only after the user approved a dangerous action (send, pay, publish, delete, sign, confirm, transfer, change password); otherwise such actions return status approval_required" },
             },
@@ -533,19 +534,20 @@ export default function register(api) {
     }));
     api.registerTool((ctx) => ({
         name: "goliath_act",
-        description: "Perform human-like browser actions that are not covered by click/type: press a key, hover, wait, scroll an element into view, select options, or drag and drop.",
+        description: "Perform human-like browser actions that are not covered by click/type: press and hold, press a key, hover, wait, scroll an element into view, select options, or drag and drop.",
         parameters: {
             type: "object",
             properties: {
                 tabId: { type: "string", description: "Tab identifier" },
                 kind: {
                     type: "string",
-                    enum: ["press", "hover", "wait", "scrollIntoView", "select_option", "drag"],
+                    enum: ["hold", "press", "hover", "wait", "scrollIntoView", "select_option", "drag"],
                 },
-                ref: { type: "string", description: "Element ref for hover, scrollIntoView, or select_option" },
+                ref: { type: "string", description: "Element ref for hover, scrollIntoView, select_option, or hold" },
                 selector: { type: "string", description: "CSS selector alternative" },
                 key: { type: "string", description: "Keyboard key for kind=press, such as Enter or Control+A" },
-                timeMs: { type: "number", description: "Milliseconds for kind=wait" },
+                timeMs: { type: "number", description: "Milliseconds for kind=wait, or hold duration for kind=hold" },
+                holdMs: { type: "number", minimum: 200, maximum: 15000, description: "Milliseconds for kind=hold" },
                 text: { type: "string", description: "Visible text to await for kind=wait" },
                 loadState: { type: "string", enum: ["load", "domcontentloaded", "networkidle"] },
                 value: { type: "string", description: "Single option value for kind=select_option" },
