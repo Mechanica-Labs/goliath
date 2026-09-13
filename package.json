@@ -1,6 +1,6 @@
 {
   "name": "@mechanica-labs/goliath",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Hermes-native browser hands for AI agents: persistent sessions, human-like actions, and secure uploads over MCP",
   "type": "module",
   "private": false,
@@ -47,6 +47,7 @@
     "plugins/persistence/index.js",
     "plugins/vnc/apt.txt",
     "plugins/vnc/index.js",
+    "plugins/vnc/README.md",
     "plugins/vnc/spawn.js",
     "plugins/vnc/vnc-launcher.js",
     "plugins/vnc/vnc-watcher.sh",

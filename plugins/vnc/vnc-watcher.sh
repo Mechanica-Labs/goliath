@@ -20,6 +20,36 @@ log() { printf '[vnc-watcher] %s\n' "$*" >&2; }
 
 CURRENT_DISPLAY=""
 X11VNC_PID=""
+NOVNC_PID=""
+
+cleanup() {
+  [ -n "$X11VNC_PID" ] && kill "$X11VNC_PID" 2>/dev/null || true
+  [ -n "$NOVNC_PID" ] && kill "$NOVNC_PID" 2>/dev/null || true
+}
+
+trap cleanup EXIT INT TERM
+
+find_display() {
+  if [ -n "${VNC_DISPLAY_FILE:-}" ] && [ -r "$VNC_DISPLAY_FILE" ]; then
+    DISPLAY_VALUE=$(head -n 1 "$VNC_DISPLAY_FILE" 2>/dev/null || true)
+    DISPLAY_NUMBER=${DISPLAY_VALUE#:}
+    case "$DISPLAY_VALUE:$DISPLAY_NUMBER" in
+      :*:[0-9]*)
+        case "$DISPLAY_NUMBER" in
+          *[!0-9]*) ;;
+          *) printf '%s\n' "$DISPLAY_VALUE"; return 0 ;;
+        esac
+        ;;
+    esac
+  fi
+
+  # Compatibility fallback for older launchers that supplied an explicit :N.
+  ps -eo args= 2>/dev/null | awk -v res="$VNC_RESOLUTION" '
+    /\/Xvfb/ && index($0, res) {
+      for (i=1;i<=NF;i++) if ($i ~ /^:[0-9]+$/) { print $i; exit }
+    }
+  ' | head -1
+}
 
 # Prepare password file if requested
 PASSFILE=""
@@ -41,18 +71,19 @@ fi
 VNC_BIND="${VNC_BIND:-127.0.0.1}"
 log "Starting noVNC (websockify) on $VNC_BIND:$NOVNC_PORT -> 127.0.0.1:$VNC_PORT"
 websockify --web "$NOVNC_DIR" "$VNC_BIND:$NOVNC_PORT" "127.0.0.1:$VNC_PORT" >/var/log/novnc.log 2>&1 &
+NOVNC_PID=$!
 
 log "VNC watcher started -- will attach x11vnc when Goliath's Xvfb appears"
 
 while true; do
-  # Find Xvfb with our patched resolution
-  FOUND=$(ps -eo args= 2>/dev/null | awk -v res="$VNC_RESOLUTION" '
-    /\/Xvfb :[0-9]+/ && index($0, res) {
-      for (i=1;i<=NF;i++) if ($i ~ /^:[0-9]+$/) { print $i; exit }
-    }
-  ' | head -1)
+  # Use the exact display announced by Goliath, with legacy process discovery as a fallback.
+  FOUND=$(find_display)
 
-  if [ -n "$FOUND" ] && [ "$FOUND" != "$CURRENT_DISPLAY" ]; then
+  if [ -n "$FOUND" ] && {
+    [ "$FOUND" != "$CURRENT_DISPLAY" ] ||
+    [ -z "$X11VNC_PID" ] ||
+    ! kill -0 "$X11VNC_PID" 2>/dev/null
+  }; then
     # New or changed display -- (re)attach x11vnc
     if [ -n "$X11VNC_PID" ] && kill -0 "$X11VNC_PID" 2>/dev/null; then
       log "Goliath display changed ($CURRENT_DISPLAY -> $FOUND), restarting x11vnc"
@@ -76,6 +107,11 @@ while true; do
     sleep 1
     X11VNC_PID=$(pgrep -f "x11vnc.*-display $CURRENT_DISPLAY" | head -1)
     log "x11vnc running (pid=$X11VNC_PID) on DISPLAY=$CURRENT_DISPLAY"
+  elif [ -z "$FOUND" ] && [ -n "$CURRENT_DISPLAY" ]; then
+    log "Goliath display closed ($CURRENT_DISPLAY)"
+    [ -n "$X11VNC_PID" ] && kill "$X11VNC_PID" 2>/dev/null || true
+    X11VNC_PID=""
+    CURRENT_DISPLAY=""
   fi
 
   sleep 2

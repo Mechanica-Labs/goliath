@@ -8,9 +8,9 @@ Interactive browser access via VNC. Log into sites visually, solve CAPTCHAs, app
 ## How it works
 
 ```
-Goliath (Xvfb :99, 1920x1080)
+Goliath (dynamic Xvfb display, 1920x1080)
     ↑
-x11vnc (attaches to :99, port 5900)
+x11vnc (attaches to the announced display, port 5900)
     ↑
 noVNC / websockify (port 6080)
     ↑
@@ -23,13 +23,32 @@ The plugin overrides Goliath's default 1x1 virtual display with a human-usable r
 
 ### Docker
 
+The viewer requires Linux and Xvfb. On macOS or Windows, run the standard
+Goliath image in Docker. The release image already contains the optional VNC
+dependencies, although the plugin stays disabled until `ENABLE_VNC=1` is set.
+
 ```bash
-docker run -p 9377:9377 -p 6080:6080 \
+docker run -p 9377:9377 -p 127.0.0.1:6080:6080 \
   -e ENABLE_VNC=1 \
+  -e VNC_BIND=0.0.0.0 \
   goliath
 
 # Open http://localhost:6080/vnc.html in your browser
 ```
+
+### Watch humanized input live
+
+Keep the noVNC page open, then send a humanized action through Goliath. The
+viewer shows the curved pointer path and the resulting click in real time.
+
+```bash
+curl -sS -X POST http://localhost:9377/tabs/TAB_ID/click \
+  -H 'Content-Type: application/json' \
+  -d '{"userId":"agent1","ref":"e1","humanized":{"profile":"balanced","visualize":true}}'
+```
+
+Use `VIEW_ONLY=1` when the viewer should observe the run without being able to
+send mouse or keyboard input back to Goliath.
 
 ### Config file
 
@@ -51,7 +70,10 @@ docker run -p 9377:9377 -p 6080:6080 \
 
 1. **Start with VNC enabled:**
    ```bash
-   docker run -p 9377:9377 -p 6080:6080 -e ENABLE_VNC=1 goliath
+   docker run -p 9377:9377 -p 127.0.0.1:6080:6080 \
+     -e ENABLE_VNC=1 \
+     -e VNC_BIND=0.0.0.0 \
+     goliath
    ```
 
 2. **Create a session and navigate to the login page:**
@@ -130,6 +152,7 @@ Export the full Playwright storage state (cookies + localStorage origins) for a 
 | env | `VIEW_ONLY` | Disable mouse/keyboard input (`1`) | off |
 | env | `VNC_PORT` | x11vnc listen port | `5900` |
 | env | `NOVNC_PORT` | noVNC web UI port | `6080` |
+| env | `VNC_BIND` | noVNC bind address inside the container | `127.0.0.1` |
 | config | `plugins.vnc.enabled` | Enable the plugin | `false` |
 | config | `plugins.vnc.password` | x11vnc password | none |
 | config | `plugins.vnc.resolution` | Xvfb screen resolution | `1920x1080` |
@@ -150,7 +173,7 @@ Environment variables override config file values.
 
 ## System dependencies
 
-The plugin declares its apt dependencies in `apt.txt` — these are installed automatically during `docker build` via `scripts/install-plugin-deps.sh`:
+The plugin declares its apt dependencies in `apt.txt`. Release Docker images install dependencies for all bundled plugins via `scripts/install-plugin-deps.sh`, even when a plugin remains disabled at runtime:
 
 - `x11vnc` — attaches to Xvfb display
 - `novnc` + `python3-websockify` — web-based VNC client
