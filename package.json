@@ -191,8 +191,9 @@
     ]
   },
   "scripts": {
+    "audit:security": "npm audit --audit-level=moderate",
     "build": "tsc -p .",
-    "prepublishOnly": "npm run build && npm run generate-openapi && npm test && npm run test:packed-install",
+    "prepublishOnly": "npm run audit:security && npm run build && npm run generate-openapi && npm test && npm run test:packed-install",
     "setup": "node scripts/install.js",
     "doctor": "node scripts/install.js --check",
     "install:browser": "node scripts/install.js --skip-deps",
@@ -227,6 +228,7 @@
     "yaml": "^2.9.0"
   },
   "overrides": {
+    "qs": "6.16.0",
     "camoufox-js": {
       "ua-parser-js": "1.0.41"
     }

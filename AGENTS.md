@@ -242,6 +242,16 @@ npm test                          # Unit, package-integrity, and OpenAPI tests
 npx jest tests/unit/openapi.test.js
 ```
 
+## Release Gate (REQUIRED)
+
+Before any version bump, package publish, tag, or GitHub release:
+
+- Review every contributor change included in the release against the latest `main`. Do not rely on the pull request description or green CI alone.
+- Reproduce the claimed fix and test the failure boundaries, including limits, redirects, malformed input, and security-sensitive data flow when relevant.
+- Run `npm run audit:security`, `npm run build`, `npm run generate-openapi`, `npm test`, and the relevant live or end-to-end tests on the complete release candidate.
+- Inspect the package contents and confirm the version is consistent in every published manifest and generated file.
+- Stop the release when a security finding, failed check, unreviewed contributor change, or unexplained behavior remains. Fix it, add a regression test, and rerun the full gate before releasing.
+
 ## npm Releases
 
 - The npm package source of truth is the public repo remote `https://github.com/Mechanica-Labs/goliath.git`, normally available locally as the `public` git remote. Do not publish from the private archive workspace path or from the wrong browser/login flow.
