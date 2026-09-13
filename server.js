@@ -46,7 +46,7 @@ import { createReporter, createTabHealthTracker, collectResourceSnapshot, classi
 import { mountDocs } from './lib/openapi.js';
 import { initSentry, captureException as sentryCaptureException, setupExpressErrorHandler as setupSentryErrorHandler, flush as sentryFlush } from './lib/sentry.js';
 import { prepareExternalCamoufoxExecutable } from './lib/camoufox-executable.js';
-import { humanizedClick, humanizedPressAndHold, humanizedOptions, humanizedScroll, humanizedType, parseHoldMs } from './lib/humanized-input.js';
+import { HumanizedInputError, humanizedClick, humanizedPressAndHold, humanizedOptions, humanizedScroll, humanizedType, parseHoldMs } from './lib/humanized-input.js';
 import { coerceHandsSteps, HandsError, computeHandBudgetMs } from './lib/hands.js';
 import { approvalRequiredResponse, classifyDangerousAction, normalizeActionLabel } from './lib/dangerous-actions.js';
 import {
@@ -278,6 +278,11 @@ function sendError(res, err, extraFields = {}) {
     body.reason = err.reason;
   }
   if (err.handoff) body.handoff = err.handoff;
+  if (err instanceof HumanizedInputError) {
+    if (err.hit) body.hit = err.hit;
+    if (err.delivered !== undefined) body.delivered = err.delivered;
+    if (err.hint) body.hint = err.hint;
+  }
   // Report unexpected 500s to Sentry (skip intentional admission-control 503s)
   if (status >= 500 && !err.statusCode) {
     sentryCaptureException(err, {
@@ -812,6 +817,11 @@ async function withInputDispatchTimeout(operation) {
     throw err;
   }
 }
+
+// Handed to lib/humanized-input.js so every humanized pointer dispatch gets the
+// same 5s bound as the direct mouse sequence. Before this, a hung page.mouse call
+// inside a humanized click ran into the 30s handler timeout and destroyed the session.
+const boundedDispatch = (operation) => withInputDispatchTimeout(operation);
 
 function requestTimeoutMs(baseMs = HANDLER_TIMEOUT_MS) {
   return proxyPool?.canRotateSessions ? Math.max(baseMs, 180000) : baseMs;
@@ -4113,7 +4123,10 @@ app.post('/tabs/:tabId/wait', async (req, res) => {
  *         description: >
  *           Click result with optional post-action snapshot, or an ApprovalRequired body
  *           (`status: approval_required`) when the target is a dangerous control and
- *           `confirm` was not true.
+ *           `confirm` was not true. For humanized clicks, `input.hit` reports the element
+ *           found under the pointer before the press and `input.delivered` whether a click
+ *           event reached the target (`null` when the page navigated or tore the element
+ *           down before it could be read).
  *         content:
  *           application/json:
  *             schema:
@@ -4128,6 +4141,17 @@ app.post('/tabs/:tabId/wait', async (req, res) => {
  *               $ref: '#/components/schemas/Error'
  *       404:
  *         description: Tab not found.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       409:
+ *         description: >
+ *           Humanized click could not be verified: `code: target_obscured` when another
+ *           element sits under the pointer after one corrective re-aim, or
+ *           `code: click_not_delivered` when no click event reached the target. The body
+ *           carries `hit`, `delivered`, and a `hint`; retry after a snapshot or send
+ *           `humanized:false`.
  *         content:
  *           application/json:
  *             schema:
@@ -4200,6 +4224,7 @@ app.post('/tabs/:tabId/click', async (req, res) => {
             profile: inputConfig.profile,
             visualize: inputConfig.visualize,
             record: (type, detail) => recordBehaviorEvent(tabState.behavior, type, detail),
+            dispatch: boundedDispatch,
           });
           return;
         }
@@ -4209,7 +4234,11 @@ app.post('/tabs/:tabId/click', async (req, res) => {
             profile: inputConfig.profile,
             visualize: inputConfig.visualize,
             doubleClick,
+            // Google SERPs are always overlay-intercepted; keep pressing there like the
+            // direct force-click path does, the delivery probe still reports the truth.
+            strictHitTarget: !onGoogleSerp,
             record: (type, detail) => recordBehaviorEvent(tabState.behavior, type, detail),
+            dispatch: boundedDispatch,
           });
           return;
         }
@@ -4892,6 +4921,7 @@ app.post('/tabs/:tabId/scroll', async (req, res) => {
         inputResult = await humanizedScroll(tabState.page, direction, amount, {
           profile: inputConfig.profile,
           record: (type, detail) => recordBehaviorEvent(tabState.behavior, type, detail),
+          dispatch: boundedDispatch,
         });
       } else {
         const isVertical = direction === 'up' || direction === 'down';
@@ -5115,7 +5145,9 @@ async function handsClick(tabState, locator, inputConfig, doubleClick = false) {
       profile: inputConfig.profile,
       visualize: inputConfig.visualize,
       doubleClick,
+      strictHitTarget: !isGoogleSerp(tabState.page.url()),
       record: (type, detail) => recordBehaviorEvent(tabState.behavior, type, detail),
+      dispatch: boundedDispatch,
     });
   }
   const dispatchMouseSequence = () => withInputDispatchTimeout(async () => {
@@ -5216,6 +5248,7 @@ async function handsScroll(tabState, step, inputConfig) {
     return await humanizedScroll(tabState.page, step.direction, step.amount, {
       profile: inputConfig.profile,
       record: (type, detail) => recordBehaviorEvent(tabState.behavior, type, detail),
+      dispatch: boundedDispatch,
     });
   }
   const isVertical = step.direction === 'up' || step.direction === 'down';
@@ -5492,7 +5525,7 @@ app.post('/tabs/:tabId/hands', async (req, res) => {
           }
         } catch (err) {
           if (err?.code === 'policy_violation') throw err;
-          results.push({ index: i, action: step.action, ok: false, error: safeError(err) });
+          results.push({ index: i, action: step.action, ok: false, error: safeError(err), ...(err.code ? { code: err.code } : {}) });
           abortedAt = i;
           break;
         }
@@ -8195,6 +8228,7 @@ app.post('/act', async (req, res) => {
             holdMs,
             profile: 'fast',
             record: (type, detail) => recordBehaviorEvent(tabState.behavior, type, detail),
+            dispatch: boundedDispatch,
           });
           await tabState.page.waitForTimeout(500);
           tabState.refs = await buildRefs(tabState.page);
@@ -8216,6 +8250,7 @@ app.post('/act', async (req, res) => {
                 holdMs: clickHoldMs,
                 profile: 'fast',
                 record: (type, detail) => recordBehaviorEvent(tabState.behavior, type, detail),
+                dispatch: boundedDispatch,
               });
               return;
             }
