@@ -4,6 +4,8 @@
  */
 
 import { spawn } from './spawn.js';
+import { mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -35,9 +37,15 @@ export function resolveVncConfig(pluginConfig = {}) {
  */
 export function startWatcher({ resolution, vncPassword, viewOnly, vncPort, novncPort, log, events }) {
   const watcherPath = path.join(__dirname, 'vnc-watcher.sh');
+  const runtimeDir = path.join(os.tmpdir(), `goliath-vnc-${process.pid}`);
+  const displayFile = path.join(runtimeDir, 'display');
+  mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
+  writeFileSync(displayFile, '', { mode: 0o600 });
+
   const watcher = spawn('sh', [watcherPath], {
     env: {
       ...process.env,
+      VNC_DISPLAY_FILE: displayFile,
       VNC_PASSWORD: vncPassword,
       VNC_RESOLUTION: resolution,
       VIEW_ONLY: viewOnly ? '1' : '0',
@@ -53,6 +61,7 @@ export function startWatcher({ resolution, vncPassword, viewOnly, vncPort, novnc
   });
 
   watcher.on('exit', (code, signal) => {
+    rmSync(runtimeDir, { recursive: true, force: true });
     log('warn', 'vnc watcher exited', { code, signal });
     events.emit('vnc:watcher:stopped', { code, signal });
   });
@@ -60,5 +69,26 @@ export function startWatcher({ resolution, vncPassword, viewOnly, vncPort, novnc
   log('info', 'vnc watcher started', { pid: watcher.pid });
   events.emit('vnc:watcher:started', { pid: watcher.pid });
 
-  return watcher;
+  return {
+    process: watcher,
+    setDisplay(display) {
+      const normalized = String(display || '').trim();
+      if (normalized && !/^:\d+$/.test(normalized)) {
+        log('warn', 'vnc watcher ignored invalid display', { display: normalized });
+        return false;
+      }
+
+      const temporaryFile = `${displayFile}.tmp`;
+      writeFileSync(temporaryFile, normalized, { mode: 0o600 });
+      renameSync(temporaryFile, displayFile);
+      log('info', normalized ? 'vnc display announced' : 'vnc display cleared', {
+        display: normalized || null,
+      });
+      return true;
+    },
+    stop() {
+      if (watcher.exitCode === null) watcher.kill('SIGTERM');
+      rmSync(runtimeDir, { recursive: true, force: true });
+    },
+  };
 }

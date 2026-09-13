@@ -107,3 +107,17 @@ test('dangerous-action brake defaults to confirm and honours GOLIATH_DANGEROUS_A
     process.env = before;
   }
 });
+
+test('ENABLE_VNC activates the optional VNC plugin', () => {
+  const before = { ...process.env };
+  try {
+    process.env.ENABLE_VNC = '1';
+    process.env.VNC_BIND = '0.0.0.0';
+    const config = loadConfig();
+    expect(config.pluginEnableOverrides).toEqual(['vnc']);
+    expect(config.serverEnv.ENABLE_VNC).toBe('1');
+    expect(config.serverEnv.VNC_BIND).toBe('0.0.0.0');
+  } finally {
+    process.env = before;
+  }
+});

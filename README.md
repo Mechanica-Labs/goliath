@@ -15,8 +15,8 @@ Goliath is built first for Hermes: it prints ready-to-paste `config.yaml`, keeps
 Requirement: Node.js 22+. The one-time setup downloads about 300 MB for the browser engine.
 
 ```bash
-npx -y @mechanica-labs/goliath@0.2.0 install
-npx -y @mechanica-labs/goliath@0.2.0 doctor
+npx -y @mechanica-labs/goliath@0.2.1 install
+npx -y @mechanica-labs/goliath@0.2.1 doctor
 ```
 
 If you already have a compatible Camoufox executable, set `GOLIATH_EXECUTABLE=/absolute/path/to/camoufox` instead of running `npx camoufox-js fetch`.
@@ -31,7 +31,7 @@ Use `goliath setup` when you only want ready-to-paste Hermes YAML plus JSON for 
 mcp_servers:
   goliath:
     command: "npx"
-    args: ["-y", "@mechanica-labs/goliath@0.2.0", "mcp"]
+    args: ["-y", "@mechanica-labs/goliath@0.2.1", "mcp"]
     env:
       GOLIATH_USER_ID: "personal-assistant"
 ```
@@ -171,14 +171,14 @@ Semantic safety is fail-closed at the browser boundary: contracts are tied to on
 
 ## Humanized input and telemetry
 
-Click, type, and scroll requests accept `"humanized": true`. The API then uses curved pointer trajectories, bounded jitter and hesitation, variable key timing, or eased wheel pulses instead of a single instant automation event. An object form can select the `fast`, `balanced`, or `deliberate` profile.
+Click, type, and scroll requests accept `"humanized": true`. The API then uses curved pointer trajectories, bounded jitter and hesitation, variable key timing, or eased wheel pulses instead of a single instant automation event. An object form can select the `fast`, `balanced`, or `deliberate` profile. Set `"visualize": true` in that object to show a temporary pointer and click pulse in a live VNC viewer.
 
 Click also accepts `"holdMs"` (200 to 15000) for a sustained press-and-hold. That is an interaction primitive for buttons that fill while the pointer stays down. It is not proof that a third-party challenge will accept the session.
 
 ```bash
 curl -sS -X POST http://localhost:9377/tabs/TAB_ID/click \
   -H 'Content-Type: application/json' \
-  -d '{"userId":"agent1","ref":"e1","humanized":{"profile":"balanced"}}'
+  -d '{"userId":"agent1","ref":"e1","humanized":{"profile":"balanced","visualize":true}}'
 
 curl -sS -X POST http://localhost:9377/tabs/TAB_ID/click \
   -H 'Content-Type: application/json' \
@@ -334,7 +334,7 @@ Violations return HTTP 403 with `code: "policy_violation"`, increment
 
 ## MCP and plugins
 
-Bundled plugins provide YouTube transcript extraction, persistent session storage, and optional VNC access. Enable or configure them in `goliath.config.json`.
+Bundled plugins provide YouTube transcript extraction, persistent session storage, and optional noVNC access. Enable or configure them in `goliath.config.json`. The [VNC plugin guide](plugins/vnc/README.md) includes a localhost-safe Docker command and a live humanized-input example.
 
 ```bash
 npm run plugin list

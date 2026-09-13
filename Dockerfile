@@ -51,8 +51,9 @@ COPY lib/ ./lib/
 COPY plugins/ ./plugins/
 COPY scripts/ ./scripts/
 
-# Install default plugin dependencies (apt packages + post-install hooks)
-RUN sh scripts/install-plugin-deps.sh
+# Install every bundled plugin dependency. Plugins remain disabled or enabled
+# by goliath.config.json at runtime, but the release image is ready for either.
+RUN GOLIATH_INSTALL_ALL_PLUGIN_DEPS=1 sh scripts/install-plugin-deps.sh
 
 ENV NODE_ENV=production
 ENV GOLIATH_PORT=9377
@@ -68,4 +69,4 @@ FROM goliath AS with-plugins
 COPY plugins/ ./plugins/
 COPY goliath.config.json ./
 COPY scripts/install-plugin-deps.sh /tmp/install-plugin-deps.sh
-RUN /tmp/install-plugin-deps.sh && rm /tmp/install-plugin-deps.sh
+RUN GOLIATH_INSTALL_ALL_PLUGIN_DEPS=1 /tmp/install-plugin-deps.sh && rm /tmp/install-plugin-deps.sh

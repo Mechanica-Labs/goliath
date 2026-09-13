@@ -19,7 +19,7 @@ function sourceFiles(dir) {
 }
 
 test('package uses the published Camoufox runtime and ships its CLIs', () => {
-  expect(manifest).toMatchObject({ name: '@mechanica-labs/goliath', version: '0.2.0', private: false });
+  expect(manifest).toMatchObject({ name: '@mechanica-labs/goliath', version: '0.2.1', private: false });
   expect(manifest.dependencies['camoufox-js']).toBeDefined();
   expect(manifest.dependencies['goliath-js']).toBeUndefined();
   const cli = resolve(root, manifest.bin.goliath);
@@ -147,4 +147,10 @@ test('third-party notices identify the dependency licenses that affect redistrib
   expect(notice).toContain('MPL-2.0');
   expect(notice).toContain('Apache-2.0');
   expect(notice).not.toContain('AGPL-3.0-or-later');
+});
+
+test('release Docker image includes optional bundled plugin dependencies', () => {
+  const dockerfile = readFileSync(resolve(root, 'Dockerfile'), 'utf8');
+  expect(dockerfile).toContain('GOLIATH_INSTALL_ALL_PLUGIN_DEPS=1 sh scripts/install-plugin-deps.sh');
+  expect(dockerfile).toContain('GOLIATH_INSTALL_ALL_PLUGIN_DEPS=1 /tmp/install-plugin-deps.sh');
 });

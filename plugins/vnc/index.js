@@ -95,11 +95,23 @@ export async function register(app, ctx, pluginConfig = {}) {
     events,
   });
 
+  events.on('browser:launched', ({ display }) => {
+    watcher.setDisplay(display);
+  });
+
+  events.on('browser:restart', () => {
+    watcher.setDisplay('');
+  });
+
+  events.on('browser:closed', () => {
+    watcher.setDisplay('');
+  });
+
   // Clean up watcher on server shutdown
   events.on('server:shutdown', () => {
-    if (watcher.exitCode === null) {
+    if (watcher.process.exitCode === null) {
       log('info', 'killing vnc watcher on shutdown');
-      watcher.kill('SIGTERM');
+      watcher.stop();
     }
   });
 

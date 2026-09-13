@@ -4090,6 +4090,9 @@ app.post('/tabs/:tabId/wait', async (req, res) => {
  *                       profile:
  *                         type: string
  *                         enum: [fast, balanced, deliberate]
+ *                       visualize:
+ *                         type: boolean
+ *                         description: Show a temporary pointer and click pulse in the page for live viewers.
  *               coordinates:
  *                 type: object
  *                 properties:
@@ -4195,6 +4198,7 @@ app.post('/tabs/:tabId/click', async (req, res) => {
           inputResult = await humanizedPressAndHold(tabState.page, locator, tabState, {
             holdMs,
             profile: inputConfig.profile,
+            visualize: inputConfig.visualize,
             record: (type, detail) => recordBehaviorEvent(tabState.behavior, type, detail),
           });
           return;
@@ -4203,6 +4207,7 @@ app.post('/tabs/:tabId/click', async (req, res) => {
         if (inputConfig.enabled) {
           inputResult = await humanizedClick(tabState.page, locator, tabState, {
             profile: inputConfig.profile,
+            visualize: inputConfig.visualize,
             doubleClick,
             record: (type, detail) => recordBehaviorEvent(tabState.behavior, type, detail),
           });
@@ -4847,6 +4852,9 @@ app.post('/tabs/:tabId/press', async (req, res) => {
  *                       profile:
  *                         type: string
  *                         enum: [fast, balanced, deliberate]
+ *                       visualize:
+ *                         type: boolean
+ *                         description: Show a temporary pointer and click pulse in the page for live viewers.
  *     responses:
  *       423:
  *         description: Tab paused for human handoff.
@@ -5105,6 +5113,7 @@ async function handsClick(tabState, locator, inputConfig, doubleClick = false) {
   if (inputConfig.enabled) {
     return await humanizedClick(tabState.page, locator, tabState, {
       profile: inputConfig.profile,
+      visualize: inputConfig.visualize,
       doubleClick,
       record: (type, detail) => recordBehaviorEvent(tabState.behavior, type, detail),
     });

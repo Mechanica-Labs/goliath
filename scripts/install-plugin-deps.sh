@@ -8,8 +8,13 @@ set -e
 CONFIG="/app/goliath.config.json"
 PLUGINS_DIR="/app/plugins"
 
-# Read plugin list from goliath.config.json, or fall back to all plugin dirs
-if [ -f "$CONFIG" ] && command -v node >/dev/null 2>&1; then
+# Docker release images include dependencies for every bundled plugin so a
+# plugin that is disabled by default can still be enabled at container runtime.
+if [ "${GOLIATH_INSTALL_ALL_PLUGIN_DEPS:-0}" = "1" ]; then
+  PLUGIN_LIST=""
+else
+  # Read plugin list from goliath.config.json, or fall back to all plugin dirs.
+  if [ -f "$CONFIG" ] && command -v node >/dev/null 2>&1; then
   PLUGIN_LIST=$(node -e "
     const c = JSON.parse(require('fs').readFileSync('$CONFIG','utf-8'));
     if (Array.isArray(c.plugins)) {
@@ -21,6 +26,7 @@ if [ -f "$CONFIG" ] && command -v node >/dev/null 2>&1; then
         .join(' '));
     }
   " 2>/dev/null || echo "")
+  fi
 fi
 
 if [ -z "$PLUGIN_LIST" ]; then
