@@ -187,6 +187,8 @@ curl -sS -X POST http://localhost:9377/tabs/TAB_ID/click \
 curl -sS 'http://localhost:9377/tabs/TAB_ID/behavior?userId=agent1'
 ```
 
+A humanized click does not press blind. After the pointer arrives it checks which element is under it (one corrective re-aim if the layout moved) and then confirms that a click event reached the target. The response reports both in `input.hit` and `input.delivered`. When the check fails the route answers `409` with `code: target_obscured` or `code: click_not_delivered` and a `hint`, instead of `ok: true` for a click that changed nothing. Every humanized pointer dispatch is bounded like the direct path, so a hung pointer fails the step with `input_dispatch_timeout` and keeps the session.
+
 Behavior reports retain at most 512 in-memory events and summarize timing entropy and variance. Their `assessment` is a local diversity heuristic, not proof that a third-party CAPTCHA or bot detector will accept a session.
 
 Sensitive cookie and trace endpoints can additionally use `GOLIATH_API_KEY`; administrative shutdown can use `GOLIATH_ADMIN_KEY`.
