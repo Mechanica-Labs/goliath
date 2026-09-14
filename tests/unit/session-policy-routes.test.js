@@ -205,45 +205,245 @@ test('browser request interception blocks denied top-level and iframe navigation
   expect(intercepted.continue).not.toHaveBeenCalled();
 });
 
-test('redirect hops are policy-checked before the browser sees them', async () => {
-  await request('/sessions/redirects/policy', {
-    method: 'POST', body: { allowedOrigins: ['https://app.example.com'] },
-  });
-  let handler;
-  const context = { route: jest.fn(async (_pattern, routeHandler) => { handler = routeHandler; }) };
-  await __testing.installSessionPolicyNavigationGuard(context, 'redirects');
-
-  const makeResponse = (status, url, location) => ({
+function redirectResponse(status, url, location, extraHeaders = {}) {
+  return {
     status: () => status,
     url: () => url,
-    headers: () => (location ? { location } : {}),
-  });
-  const makeRoute = (responses) => ({
-    request: () => ({ isNavigationRequest: () => true, url: () => 'https://app.example.com/start' }),
-    fetch: jest.fn(async () => responses.shift()),
+    headers: () => ({ ...(location ? { location } : {}), ...extraHeaders }),
+  };
+}
+
+async function makeRedirectGuard(userId, policy) {
+  await request(`/sessions/${userId}/policy`, { method: 'POST', body: policy });
+  let handler;
+  const hopResponses = [];
+  const context = {
+    route: jest.fn(async (_pattern, routeHandler) => { handler = routeHandler; }),
+    request: { fetch: jest.fn(async () => hopResponses.shift()) },
+  };
+  await __testing.installSessionPolicyNavigationGuard(context, userId);
+  const makeRoute = (first, {
+    url = 'https://app.example.com/start', method = 'GET', postData = null, headers = {},
+  } = {}) => ({
+    request: () => ({
+      isNavigationRequest: () => true,
+      url: () => url,
+      method: () => method,
+      headers: () => headers,
+      postDataBuffer: () => (postData === null ? null : Buffer.from(postData)),
+    }),
+    fetch: jest.fn(async () => first),
     fulfill: jest.fn(async () => {}),
     abort: jest.fn(async () => {}),
     continue: jest.fn(async () => {}),
   });
+  return { context, hopResponses, handle: route => handler(route), makeRoute };
+}
 
-  // A redirect onto a denied origin is refused before the hop is fetched.
-  const denied = makeRoute([
-    makeResponse(302, 'https://app.example.com/start', 'https://evil.example.com/landing'),
-  ]);
-  await handler(denied);
-  expect(denied.abort).toHaveBeenCalledWith('blockedbyclient');
-  expect(denied.fulfill).not.toHaveBeenCalled();
-  expect(denied.fetch).toHaveBeenCalledTimes(1);
+test('a redirect onto a denied origin is refused before the hop is fetched', async () => {
+  const guard = await makeRedirectGuard('redirects', { allowedOrigins: ['https://app.example.com'] });
+  const route = guard.makeRoute(redirectResponse(302, 'https://app.example.com/start', 'https://evil.example.com/landing'));
+  await guard.handle(route);
+  expect(route.fetch).toHaveBeenCalledWith({ maxRedirects: 0 });
+  expect(guard.context.request.fetch).not.toHaveBeenCalled();
+  expect(route.abort).toHaveBeenCalledWith('blockedbyclient');
+  expect(route.fulfill).not.toHaveBeenCalled();
+});
 
-  // A redirect chain that stays inside the policy is followed and served.
-  const allowed = makeRoute([
-    makeResponse(302, 'https://app.example.com/start', '/next'),
-    makeResponse(200, 'https://app.example.com/next', null),
+test('every hop of an allowed chain is checked, fetched without auto-redirects, and served', async () => {
+  const guard = await makeRedirectGuard('redirects-allowed', {
+    allowedOrigins: ['https://app.example.com', 'https://sso.example.com'],
+  });
+  guard.hopResponses.push(
+    redirectResponse(302, 'https://app.example.com/next', 'https://sso.example.com/auth'),
+    redirectResponse(200, 'https://sso.example.com/auth', null, { 'set-cookie': 'sso=1', 'content-type': 'text/html' }),
+  );
+  const route = guard.makeRoute(redirectResponse(302, 'https://app.example.com/start', '/next'));
+  await guard.handle(route);
+
+  expect(guard.context.request.fetch.mock.calls.map(([url, opts]) => [url, opts.maxRedirects])).toEqual([
+    ['https://app.example.com/next', 0],
+    ['https://sso.example.com/auth', 0],
   ]);
-  await handler(allowed);
-  expect(allowed.abort).not.toHaveBeenCalled();
-  expect(allowed.fulfill).toHaveBeenCalledTimes(1);
-  expect(allowed.fetch).toHaveBeenCalledTimes(2);
+  expect(route.abort).not.toHaveBeenCalled();
+  expect(route.fulfill).toHaveBeenCalledTimes(1);
+  // The jar already stored the final hop's cookie against its own URL; the
+  // browser must not re-apply it to the originally requested URL.
+  const [{ headers }] = route.fulfill.mock.calls[0];
+  expect(headers).toEqual({ 'content-type': 'text/html' });
+
+  // A denial deep in an otherwise allowed chain still stops it at that hop.
+  guard.hopResponses.push(redirectResponse(302, 'https://sso.example.com/auth', 'https://evil.example.com/x'));
+  const deep = guard.makeRoute(redirectResponse(302, 'https://app.example.com/start', 'https://sso.example.com/auth'));
+  await guard.handle(deep);
+  expect(deep.abort).toHaveBeenCalledWith('blockedbyclient');
+  expect(deep.fulfill).not.toHaveBeenCalled();
+});
+
+test('a chain that reaches the redirect limit is refused, never handed to the browser as a 3xx', async () => {
+  const guard = await makeRedirectGuard('redirects-loop', { allowedOrigins: ['https://app.example.com'] });
+  for (let i = 1; i <= 25; i++) {
+    guard.hopResponses.push(redirectResponse(302, `https://app.example.com/hop${i}`, `/hop${i + 1}`));
+  }
+  const route = guard.makeRoute(redirectResponse(302, 'https://app.example.com/start', '/hop1'));
+  await guard.handle(route);
+  expect(guard.context.request.fetch).toHaveBeenCalledTimes(20);
+  expect(route.abort).toHaveBeenCalledWith('blockedbyclient');
+  expect(route.fulfill).not.toHaveBeenCalled();
+
+  // Exactly at the limit is still served.
+  const atLimit = await makeRedirectGuard('redirects-limit', { allowedOrigins: ['https://app.example.com'] });
+  for (let i = 1; i <= 19; i++) {
+    atLimit.hopResponses.push(redirectResponse(302, `https://app.example.com/hop${i}`, `/hop${i + 1}`));
+  }
+  atLimit.hopResponses.push(redirectResponse(200, 'https://app.example.com/hop20', null));
+  const ok = atLimit.makeRoute(redirectResponse(302, 'https://app.example.com/start', '/hop1'));
+  await atLimit.handle(ok);
+  expect(atLimit.context.request.fetch).toHaveBeenCalledTimes(20);
+  expect(ok.fulfill).toHaveBeenCalledTimes(1);
+  expect(ok.abort).not.toHaveBeenCalled();
+});
+
+test('a form POST is not resent, with its body or cookies, to a 301/302/303 redirect target', async () => {
+  for (const status of [301, 302, 303]) {
+    const guard = await makeRedirectGuard(`redirects-post-${status}`, {
+      allowedOrigins: ['https://app.example.com', 'https://pay.example.com'],
+    });
+    guard.hopResponses.push(redirectResponse(200, 'https://pay.example.com/collect', null));
+    const route = guard.makeRoute(
+      redirectResponse(status, 'https://app.example.com/checkout', 'https://pay.example.com/collect'),
+      {
+        url: 'https://app.example.com/checkout',
+        method: 'POST',
+        postData: 'card=4111&cvv=123',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Content-Length': '17',
+          Cookie: 'app_session=SECRET',
+          Authorization: 'Bearer app-token',
+          Origin: 'https://app.example.com',
+          Referer: 'https://app.example.com/checkout?cart=abc123',
+          'User-Agent': 'goliath-test',
+        },
+      },
+    );
+    await guard.handle(route);
+    expect(guard.context.request.fetch).toHaveBeenCalledTimes(1);
+    const [url, opts] = guard.context.request.fetch.mock.calls[0];
+    expect(url).toBe('https://pay.example.com/collect');
+    expect(opts.method).toBe('GET');
+    expect(opts).not.toHaveProperty('data');
+    expect(opts.headers).toEqual({
+      origin: 'null',
+      referer: 'https://app.example.com/',
+      'user-agent': 'goliath-test',
+    });
+    expect(route.fulfill).toHaveBeenCalledTimes(1);
+  }
+});
+
+test('307/308 keep the method and body but never forward cookies or cross-origin credentials', async () => {
+  for (const status of [307, 308]) {
+    const guard = await makeRedirectGuard(`redirects-keep-${status}`, {
+      allowedOrigins: ['https://app.example.com', 'https://api.example.com'],
+    });
+    guard.hopResponses.push(
+      redirectResponse(status, 'https://app.example.com/v2/submit', 'https://api.example.com/submit'),
+      redirectResponse(200, 'https://api.example.com/submit', null),
+    );
+    const route = guard.makeRoute(
+      redirectResponse(status, 'https://app.example.com/submit', '/v2/submit'),
+      {
+        url: 'https://app.example.com/submit',
+        method: 'POST',
+        postData: 'a=1',
+        headers: {
+          'content-type': 'application/x-www-form-urlencoded',
+          cookie: 'app_session=SECRET',
+          authorization: 'Bearer app-token',
+          origin: 'https://app.example.com',
+          referer: 'https://app.example.com/form?step=2',
+        },
+      },
+    );
+    await guard.handle(route);
+    const [[sameUrl, same], [crossUrl, cross]] = guard.context.request.fetch.mock.calls;
+    // Same-origin hop: body and authorization survive, the cookie header does not.
+    expect(sameUrl).toBe('https://app.example.com/v2/submit');
+    expect(same.method).toBe('POST');
+    expect(same.data.toString()).toBe('a=1');
+    expect(same.headers).toEqual({
+      'content-type': 'application/x-www-form-urlencoded',
+      authorization: 'Bearer app-token',
+      origin: 'https://app.example.com',
+      referer: 'https://app.example.com/form?step=2',
+    });
+    // Cross-origin hop straight off the initiating origin: authorization is
+    // dropped and the referrer trimmed, but Origin is not yet tainted.
+    expect(crossUrl).toBe('https://api.example.com/submit');
+    expect(cross.method).toBe('POST');
+    expect(cross.data.toString()).toBe('a=1');
+    expect(cross.headers).toEqual({
+      'content-type': 'application/x-www-form-urlencoded',
+      origin: 'https://app.example.com',
+      referer: 'https://app.example.com/',
+    });
+    expect(route.fulfill).toHaveBeenCalledTimes(1);
+  }
+});
+
+test('a 307 chain that has already left the initiating origin reports Origin: null', async () => {
+  const guard = await makeRedirectGuard('redirects-tainted', {
+    allowedOrigins: ['https://app.example.com', 'https://a.example.com', 'https://b.example.com'],
+  });
+  guard.hopResponses.push(
+    redirectResponse(307, 'https://a.example.com/in', 'https://b.example.com/out'),
+    redirectResponse(200, 'https://b.example.com/out', null),
+  );
+  const route = guard.makeRoute(
+    redirectResponse(307, 'https://app.example.com/go', 'https://a.example.com/in'),
+    { url: 'https://app.example.com/go', method: 'POST', postData: 'x=1', headers: { origin: 'https://app.example.com' } },
+  );
+  await guard.handle(route);
+  const [[, first], [, second]] = guard.context.request.fetch.mock.calls;
+  expect(first.headers.origin).toBe('https://app.example.com');
+  expect(second.headers.origin).toBe('null');
+  expect(route.fulfill).toHaveBeenCalledTimes(1);
+});
+
+test('non-redirect responses and redirects without a Location are served as-is', async () => {
+  const guard = await makeRedirectGuard('redirects-plain', { allowedOrigins: ['https://app.example.com'] });
+  const plainResponse = redirectResponse(200, 'https://app.example.com/start', null, { 'set-cookie': 'a=1' });
+  const plain = guard.makeRoute(plainResponse);
+  await guard.handle(plain);
+  expect(plain.fulfill).toHaveBeenCalledWith({ response: plainResponse });
+
+  const bare = guard.makeRoute(redirectResponse(302, 'https://app.example.com/start', null));
+  await guard.handle(bare);
+  expect(bare.fulfill).toHaveBeenCalledTimes(1);
+  expect(bare.abort).not.toHaveBeenCalled();
+  expect(guard.context.request.fetch).not.toHaveBeenCalled();
+});
+
+test('an unresolvable Location or a failed fetch fails closed', async () => {
+  const guard = await makeRedirectGuard('redirects-closed', { allowedOrigins: ['https://app.example.com'] });
+
+  const garbage = guard.makeRoute(redirectResponse(302, 'https://app.example.com/start', 'http://[not-a-host/'));
+  await guard.handle(garbage);
+  expect(garbage.abort).toHaveBeenCalledWith('blockedbyclient');
+  expect(garbage.fulfill).not.toHaveBeenCalled();
+
+  const failingFirst = guard.makeRoute(null);
+  failingFirst.fetch = jest.fn(async () => { throw new Error('socket hang up'); });
+  await guard.handle(failingFirst);
+  expect(failingFirst.abort).toHaveBeenCalledWith('blockedbyclient');
+  expect(failingFirst.continue).not.toHaveBeenCalled();
+
+  guard.context.request.fetch.mockImplementationOnce(async () => { throw new Error('ECONNRESET'); });
+  const failingHop = guard.makeRoute(redirectResponse(302, 'https://app.example.com/start', '/next'));
+  await guard.handle(failingHop);
+  expect(failingHop.abort).toHaveBeenCalledWith('blockedbyclient');
+  expect(failingHop.fulfill).not.toHaveBeenCalled();
 });
 
 test('sessions without origin rules keep the untouched request path', async () => {
