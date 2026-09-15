@@ -477,6 +477,169 @@ function enforceRequestSessionPolicy(req) {
   }
 }
 
+const POLICY_REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+// Firefox's own limit (network.http.redirection-limit). A chain that reaches it
+// is refused outright: a 3xx is never handed to the browser, because the
+// browser would follow it internally without re-entering this guard.
+const POLICY_MAX_REDIRECT_HOPS = 20;
+// Headers that describe a request body. They are dropped whenever a redirect
+// turns the request into a body-less GET (Fetch standard, HTTP-redirect fetch).
+const POLICY_REQUEST_BODY_HEADERS = ['content-type', 'content-length', 'content-encoding', 'content-language', 'content-location'];
+
+/**
+ * Record a blocked navigation and abort it. The pending decision lets the
+ * request's own handler turn the resulting browser-level abort into a
+ * policy_violation response instead of an opaque navigation failure.
+ */
+function denyPolicyNavigation(route, { userId, decision }) {
+  recordSessionPolicyViolation({ userId, decision });
+  const key = normalizeUserId(userId);
+  const record = { decision, at: Date.now() };
+  recentPolicyNavigationViolations.set(key, record);
+  const expiry = setTimeout(() => {
+    if (recentPolicyNavigationViolations.get(key) === record) recentPolicyNavigationViolations.delete(key);
+  }, 5000);
+  expiry.unref();
+  return route.abort('blockedbyclient');
+}
+
+function hasOriginRules(policy) {
+  return (policy.allowedOrigins?.length || 0) > 0 || (policy.deniedOrigins?.length || 0) > 0;
+}
+
+function redirectGuardDecision(reason, url) {
+  return { allowed: false, action: 'navigate', origin: url ? originFromUrl(url) : null, category: 'origin', reason };
+}
+
+/**
+ * Build the request for the next redirect hop the way a browser would
+ * (Fetch standard, HTTP-redirect fetch), from the hop that produced it:
+ *
+ * - 301/302 on POST and 303 on anything but GET/HEAD become a GET, and the
+ *   body and every body-describing header are dropped. Only 307/308 keep the
+ *   method and body.
+ * - The Cookie header is never carried forward. Cookies are attached per hop
+ *   from the browser context's jar for that hop's own URL, so one origin's
+ *   cookies are not sent to the next.
+ * - When the hop changes origin, Authorization is dropped, Referer is cut down
+ *   to the referring origin, and Origin becomes `null` once it is tainted.
+ */
+function nextRedirectRequest(current, status, nextUrl) {
+  let { method, postData } = current;
+  const headers = { ...current.headers };
+  let rewroteToGet = false;
+  if (((status === 301 || status === 302) && method === 'POST')
+      || (status === 303 && method !== 'GET' && method !== 'HEAD')) {
+    method = 'GET';
+    postData = null;
+    rewroteToGet = true;
+    for (const name of POLICY_REQUEST_BODY_HEADERS) delete headers[name];
+  }
+  delete headers.cookie;
+  delete headers.host;
+  const crossOrigin = originFromUrl(nextUrl) !== originFromUrl(current.url);
+  if (crossOrigin) {
+    delete headers.authorization;
+    // The origin is tainted once the chain has left the initiating origin
+    // (Fetch standard); Firefox also reports null when a cross-origin hop
+    // rewrote the request to GET. A 307/308 straight off the initiator keeps it.
+    if (headers.origin !== undefined
+        && (rewroteToGet || headers.origin === 'null' || originFromUrl(current.url) !== headers.origin)) {
+      headers.origin = 'null';
+    }
+    // Never hand a cross-origin hop more of the referrer than the default
+    // strict-origin-when-cross-origin policy would, and nothing on a downgrade.
+    if (headers.referer !== undefined) {
+      const referrerOrigin = originFromUrl(headers.referer);
+      const downgrade = headers.referer.startsWith('https:') && !nextUrl.startsWith('https:');
+      if (!referrerOrigin || downgrade) delete headers.referer;
+      else headers.referer = `${referrerOrigin}/`;
+    }
+  }
+  return { url: nextUrl, method, headers, postData };
+}
+
+function lowerCaseHeaders(headers) {
+  const out = {};
+  for (const [name, value] of Object.entries(headers || {})) out[name.toLowerCase()] = value;
+  return out;
+}
+
+/**
+ * Resolve a navigation's redirect chain hop by hop, refusing the first hop that
+ * the session policy denies. Every request is issued with redirects disabled,
+ * so no hop is ever contacted before it has been checked, and the browser only
+ * ever receives a final, non-redirect response through fulfill().
+ */
+async function followPolicyCheckedRedirects(route, context, { policy, userId }) {
+  const request = route.request();
+  let response;
+  try {
+    response = await route.fetch({ maxRedirects: 0 });
+  } catch (err) {
+    log('warn', 'policy redirect guard could not resolve navigation', { userId, error: err.message });
+    return route.abort('blockedbyclient');
+  }
+
+  let current = {
+    url: request.url(),
+    method: request.method(),
+    headers: lowerCaseHeaders(request.headers()),
+    postData: request.postDataBuffer() ?? null,
+  };
+  let hops = 0;
+  while (POLICY_REDIRECT_STATUSES.has(response.status())) {
+    const location = response.headers()?.location;
+    // A 3xx without a Location is not followed by the browser either; it is
+    // rendered as the document, so it is safe to serve.
+    if (!location) break;
+    let nextUrl;
+    try {
+      nextUrl = new URL(location, current.url).toString();
+    } catch {
+      return denyPolicyNavigation(route, { userId, decision: redirectGuardDecision('redirect_unresolvable') });
+    }
+    const decision = checkSessionPolicy(policy, { action: 'navigate', origin: nextUrl });
+    if (!decision.allowed) return denyPolicyNavigation(route, { userId, decision });
+    if (hops >= POLICY_MAX_REDIRECT_HOPS) {
+      return denyPolicyNavigation(route, { userId, decision: redirectGuardDecision('redirect_limit_exceeded', nextUrl) });
+    }
+
+    current = nextRedirectRequest(current, response.status(), nextUrl);
+    hops++;
+    try {
+      response = await context.request.fetch(current.url, {
+        method: current.method,
+        headers: current.headers,
+        ...(current.postData !== null ? { data: current.postData } : {}),
+        maxRedirects: 0,
+        failOnStatusCode: false,
+      });
+    } catch (err) {
+      log('warn', 'policy redirect guard could not follow an allowed hop', { userId, error: err.message });
+      return route.abort('blockedbyclient');
+    }
+  }
+
+  if (hops === 0) return route.fulfill({ response });
+  // Set-Cookie on every hop, including the last, was already stored in the
+  // context jar against the URL that sent it. Passing it on would make the
+  // browser apply it again, scoped to the originally requested URL instead.
+  const headers = { ...response.headers() };
+  for (const name of Object.keys(headers)) if (name.toLowerCase() === 'set-cookie') delete headers[name];
+  return route.fulfill({ response, headers });
+}
+
+/**
+ * Confine a session's navigations to its policy origins.
+ *
+ * The Playwright Firefox driver follows 3xx responses internally and does not
+ * re-invoke the route handler for the redirect target, so checking only the
+ * requested URL let an allowed origin bounce the browser onto a denied one --
+ * with that identity's cookies attached. When a session carries origin rules
+ * the guard therefore resolves redirect chains itself, checking every hop
+ * before the browser is allowed to see the response.
+ */
 async function installSessionPolicyNavigationGuard(context, userId) {
   if (typeof context?.route !== 'function') return;
   await context.route('**/*', async route => {
@@ -484,16 +647,9 @@ async function installSessionPolicyNavigationGuard(context, userId) {
     if (!request.isNavigationRequest()) return route.continue();
     const policy = policyForUser(userId);
     const decision = checkSessionPolicy(policy, { action: 'navigate', origin: request.url() });
-    if (decision.allowed) return route.continue();
-    recordSessionPolicyViolation({ userId, decision });
-    const key = normalizeUserId(userId);
-    const record = { decision, at: Date.now() };
-    recentPolicyNavigationViolations.set(key, record);
-    const expiry = setTimeout(() => {
-      if (recentPolicyNavigationViolations.get(key) === record) recentPolicyNavigationViolations.delete(key);
-    }, 5000);
-    expiry.unref();
-    return route.abort('blockedbyclient');
+    if (!decision.allowed) return denyPolicyNavigation(route, { userId, decision });
+    if (!policy || !hasOriginRules(policy)) return route.continue();
+    return followPolicyCheckedRedirects(route, context, { policy, userId });
   });
 }
 
@@ -1681,7 +1837,7 @@ function handleRouteError(err, req, res, extraFields = {}) {
   const recentPolicyViolation = policyUserId && recentPolicyNavigationViolations.get(normalizeUserId(policyUserId));
   if (recentPolicyViolation
       && Date.now() - recentPolicyViolation.at < 5000
-      && /ERR_BLOCKED_BY_CLIENT|blockedbyclient/i.test(String(err?.message || ''))) {
+      && /ERR_BLOCKED_BY_CLIENT|blockedbyclient|NS_ERROR_FAILURE|NS_BINDING_ABORTED/i.test(String(err?.message || ''))) {
     recentPolicyNavigationViolations.delete(normalizeUserId(policyUserId));
     return sendError(res, sessionPolicyViolationError(recentPolicyViolation.decision), extraFields);
   }
