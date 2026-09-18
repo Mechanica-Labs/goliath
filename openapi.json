@@ -1204,6 +1204,105 @@
         }
       }
     },
+    "/tabs/{tabId}/wall": {
+      "get": {
+        "tags": [
+          "Content"
+        ],
+        "summary": "Anti-bot wall state",
+        "description": "Reports the anti-bot wall on the current page: vendor, state (none/clear/challenge/silent), the challenge kind when one is visible, and the egress profile that is in use. `code` is present and blocking is true when the wall is unbeatable from the current network class.",
+        "parameters": [
+          {
+            "name": "tabId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "userId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Wall state."
+          },
+          "404": {
+            "description": "Tab not found."
+          }
+        }
+      }
+    },
+    "/tabs/{tabId}/wall/solve": {
+      "post": {
+        "tags": [
+          "Interaction"
+        ],
+        "summary": "Drive a visible anti-bot challenge",
+        "description": "Drives the visible challenge (for example a PerimeterX press-and-hold) through the humanized input layer and reports whether it cleared.",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "tabId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "userId"
+                ],
+                "properties": {
+                  "userId": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Challenge driven; `outcome` is cleared, blocked or not-applicable."
+          },
+          "404": {
+            "description": "Tab not found."
+          }
+        }
+      }
+    },
+    "/egress": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Fleet egress profiles and recorded anti-bot outcomes",
+        "description": "Returns the active egress profile and a matrix of what each profile has cleared or been blocked by, per anti-bot vendor.",
+        "responses": {
+          "200": {
+            "description": "Egress profile matrix."
+          }
+        }
+      }
+    },
     "/tabs/{tabId}/observe": {
       "post": {
         "tags": [
