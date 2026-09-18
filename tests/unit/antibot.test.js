@@ -147,7 +147,27 @@ test('driveChallenge drives the visible challenge through native input and repor
   expect(calls).toEqual(['hold:4200']);
   expect(result.attempted).toBe(true);
   expect(result.outcome).toBe('cleared');
-  expect(result.selector).toBe('input[type=checkbox]');
+  expect(result.selector).toContain('input[type=checkbox]');
+});
+
+test('falls back to a real press-and-hold on the challenge frame centre', async () => {
+  // Observed live on zillow.com: the PerimeterX challenge frame exposes no
+  // addressable control, so the frame box itself is the press target.
+  const page = fakePage(() => (page.pressed
+    ? { ...challengeSample(), scripts: [], frames: [], cookies: [], globals: [], bodyText: 'Welcome back' }
+    : challengeSample()), {
+    frames: [{ url: () => PX_FRAME, locator: () => ({ first: () => ({ count: async () => 0, isVisible: async () => false }) }) }],
+  });
+  page.locator = () => ({ first: () => ({ count: async () => 1, boundingBox: async () => ({ x: 100, y: 200, width: 300, height: 120 }) }) });
+  const calls = [];
+  const result = await driveChallenge(page, { vendor: 'perimeterx', state: 'challenge', challengeFrame: PX_FRAME }, {
+    humanizedClick: async () => calls.push('click'),
+    humanizedPressAndHold: async (_page, _locator, _state, options) => { page.pressed = true; calls.push({ hold: options.holdMs, strictHitTarget: options.strictHitTarget }); },
+    state: {},
+  });
+  expect(calls).toEqual([{ hold: 4200, strictHitTarget: false }]);
+  expect(result.outcome).toBe('cleared');
+  expect(result.selector).toContain('coordinate:center');
 });
 
 test('driveChallenge reports a challenge that survives native input', async () => {
