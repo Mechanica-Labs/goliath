@@ -334,6 +334,23 @@ Violations return HTTP 403 with `code: "policy_violation"`, increment
 `goliath_policy_violations_total{action,category}`, and emit the
 `session:policy:violation` plugin event.
 
+## Anti-bot walls
+
+PerimeterX, DataDome and Cloudflare can render a page normally while swallowing every real interaction. Goliath detects that state and says so:
+
+```bash
+# Wall state for the current tab (also attached to navigate/click/snapshot)
+curl 'http://127.0.0.1:9377/tabs/TAB_ID/wall?userId=agent1'
+
+# Drive a visible challenge with the native input layer
+curl -X POST http://127.0.0.1:9377/tabs/TAB_ID/wall/solve -H 'Content-Type: application/json' -d '{"userId":"agent1"}'
+
+# Which egress profile clears which vendor
+curl 'http://127.0.0.1:9377/egress'
+```
+
+A blocking wall returns a typed code such as `perimeterx:blocked` so an agent can route the flow elsewhere instead of retrying into the same block. Named egress profiles (`GOLIATH_EGRESS_PROFILES`) record what each network class clears and move the fleet to the next profile when one is a dead end. See [Anti-bot walls](docs/ANTIBOT_WALLS.md).
+
 ## MCP and plugins
 
 Bundled plugins provide YouTube transcript extraction, persistent session storage, and optional noVNC access. Enable or configure them in `goliath.config.json`. The [VNC plugin guide](plugins/vnc/README.md) includes a localhost-safe Docker command and a live humanized-input example.

@@ -279,6 +279,8 @@ docker run -p 9377:9377 goliath
 - `lib/request-utils.js` - HTTP request classification helpers (`actionFromReq`, `classifyError`)
 - `lib/dangerous-actions.js` - Keyword brake for click/type/press/hands/act on send/pay/publish/delete/sign/confirm controls (`GOLIATH_DANGEROUS_ACTIONS`)
 - `lib/snapshot.js` - Accessibility tree snapshot
+- `lib/antibot.js` - Anti-bot wall detection (PerimeterX, DataDome, Cloudflare), typed `<vendor>:blocked` verdicts, and native challenge driving
+- `lib/egress-profile.js` - Named fleet egress profiles, per-vendor outcome records, and next-profile selection for anti-bot walls
 - `lib/macros.js` - Search macro URL expansion
 - `lib/plugins.js` - Plugin loader and event bus
 - `lib/auth.js` - Shared auth middleware (API key / loopback)
@@ -357,6 +359,29 @@ app.post('/tabs/:tabId/click', async (req, res) => {
 - **After any route change, run `npm run generate-openapi`** to regenerate the committed `openapi.json`. The test suite will fail if it's stale.
 - Run `npx jest tests/unit/openapi.test.js` to verify coverage -- the test fails if any route is missing from the spec, if a stale route exists, or if `openapi.json` is out of date
 - Reusable schemas go in `components.schemas` in `lib/openapi.js` (the `swaggerDefinition`); reference them via `$ref: '#/components/schemas/Name'`
+
+## Anti-bot walls (PerimeterX, DataDome, Cloudflare)
+
+A walled page renders normally while every real interaction is swallowed. Detect
+it instead of guessing:
+
+```bash
+# Wall state for the current page (also attached to navigate/click/snapshot responses)
+curl 'http://localhost:9377/tabs/TAB_ID/wall?userId=agent1'
+# {"wall":{"vendor":"perimeterx","state":"silent","blocking":true,...},"code":"perimeterx:blocked",...}
+
+# Drive a visible challenge with the native input layer (never an injected click)
+curl -X POST http://localhost:9377/tabs/TAB_ID/wall/solve -H 'Content-Type: application/json' -d '{"userId":"agent1"}'
+
+# Which egress profile clears what
+curl 'http://localhost:9377/egress'
+```
+
+`wall.state` is `none`, `clear`, `challenge` (`kind: frame-challenge` or
+`press-hold`) or `silent`. When `blocking` is true the response also carries a
+typed `code` such as `perimeterx:blocked`: route the flow elsewhere instead of
+retrying. Egress profiles and their recorded outcomes are configured with
+`GOLIATH_EGRESS_PROFILES`; see `docs/ANTIBOT_WALLS.md`.
 
 ## Telemetry
 

@@ -8,6 +8,10 @@ import os from 'os';
 import { expandMacro } from './lib/macros.js';
 import { loadConfig } from './lib/config.js';
 import { normalizePlaywrightProxy, createProxyPool, buildProxyUrl } from './lib/proxy.js';
+import {
+  detectWall, wallIsBlocking, wallSummary, wallError, driveChallenge,
+} from './lib/antibot.js';
+import { createEgressRegistry } from './lib/egress-profile.js';
 import { createFlyHelpers } from './lib/fly.js';
 import { createPluginEvents, loadPlugins } from './lib/plugins.js';
 import { requireAuth, requireApiKey, accessKeyMiddleware, timingSafeCompare as _timingSafeCompare, isLoopbackAddress as _isLoopbackAddress } from './lib/auth.js';
@@ -127,7 +131,7 @@ const {
   tabLockTimeoutsTotal,
   failuresTotal, browserRestartsTotal, tabsDestroyedTotal,
   sessionsExpiredTotal, tabsReapedTotal, tabsRecycledTotal,
-  policyViolationsTotal,
+  policyViolationsTotal, antibotWallsTotal, egressRotationsTotal,
 } = await initMetrics({ enabled: CONFIG.prometheusEnabled });
 
 // --- Structured logging ---
@@ -902,6 +906,155 @@ if (proxyPool) {
   log('info', 'no proxy configured');
 }
 
+// ---------------------------------------------------------------------------
+// Anti-bot walls and fleet egress profiles
+//
+// Vendors classify the network before the browser matters, so the durable lever
+// is which egress the fleet uses. Profiles are named, their per-vendor outcomes
+// are recorded, and a blocked profile is swapped for the next best one at the
+// following browser launch. Detection and the typed verdict live in lib/antibot.js.
+// ---------------------------------------------------------------------------
+const egressRegistry = createEgressRegistry({
+  profiles: CONFIG.antibot.profiles,
+  stateDir: CONFIG.antibot.stateDir,
+});
+let activeEgressName = CONFIG.antibot.profiles[0]?.name || null;
+
+if (egressRegistry.list().length) {
+  log('info', 'egress profiles loaded', {
+    active: activeEgressName,
+    profiles: egressRegistry.list().map(p => `${p.name}:${p.class}`),
+  });
+}
+
+function activeEgressProfile() {
+  return activeEgressName ? egressRegistry.get(activeEgressName) : null;
+}
+
+function egressClass() {
+  return activeEgressProfile()?.class || CONFIG.antibot.classHint || 'unknown';
+}
+
+function egressLaunchProxy() {
+  const profile = activeEgressProfile();
+  if (!profile || !profile.server) return null;
+  return { server: profile.server, username: profile.username || undefined, password: profile.password || undefined };
+}
+
+/**
+ * Read the wall on the current page and remember it on the tab so every later
+ * response can carry the state without re-inspecting the page.
+ */
+async function observeWall(tabState, { response = null, stage = 'navigation', settleMs = 0 } = {}) {
+  if (!tabState || !tabState.page || tabState.page.isClosed?.()) return null;
+  let wall = null;
+  try {
+    wall = await detectWall(tabState.page, { response });
+    // The vendor's interstitial script lands after the document does. When the
+    // document itself carried a challenge status, look once more after a short
+    // settle window rather than declaring the page clean too early.
+    const status = response && typeof response.status === 'function' ? response.status() : null;
+    const challenged = status === 403 || status === 429 || status === 503;
+    if (settleMs > 0 && challenged && (!wall || wall.state === 'none')) {
+      await tabState.page.waitForTimeout(settleMs);
+      wall = await detectWall(tabState.page, { response });
+    }
+  } catch (err) {
+    log('debug', 'wall detection failed', { stage, error: err.message });
+    return null;
+  }
+  if (!wall) return null;
+  if (wall.state === 'clear') {
+    // The page carries vendor markers but is usable; drop any stale block state.
+    tabState.wall = null;
+    return wall;
+  }
+  tabState.wall = {
+    ...wallSummary(wall),
+    kind: wall.kind || null,
+    stage,
+    egressClass: egressClass(),
+    egressProfile: activeEgressName,
+    detectedAt: new Date().toISOString(),
+  };
+  return wall;
+}
+
+/**
+ * Decide what a blocking wall means for the caller. Returns the state to report
+ * plus an optional typed error, records the outcome against the egress profile,
+ * and moves the fleet to the next profile for the next browser launch when the
+ * current one is recorded as a dead end for this vendor.
+ */
+async function handleWall(tabState, wall, { userId = null, tabId = null, allowDrive = true } = {}) {
+  if (!wallIsBlocking(wall)) return null;
+  const vendor = wall.vendor || 'antibot';
+  antibotWallsTotal.labels(vendor, wall.state, 'detected').inc();
+
+  let resolved = null;
+  let drive = null;
+  if (allowDrive && CONFIG.antibot.driveChallenges && wall.state === 'challenge') {
+    drive = await driveChallenge(tabState.page, wall, {
+      humanizedClick,
+      humanizedPressAndHold,
+      state: tabState,
+      options: { record: (type, detail) => recordBehaviorEvent(tabState.behavior, type, detail) },
+    });
+    if (drive.outcome === 'cleared') {
+      resolved = 'challenge_cleared';
+      tabState.wall = { ...wallSummary(await observeWall(tabState, { stage: 'after-solve' })), solved: true };
+    } else if (drive.attempted) {
+      tabState.wall = { ...(tabState.wall || wallSummary(wall)), driveOutcome: drive.outcome, driveDetail: drive.detail };
+    }
+  }
+
+  if (resolved) {
+    antibotWallsTotal.labels(vendor, wall.state, resolved).inc();
+    egressRegistry.record(activeEgressName, vendor, 'cleared');
+    log('info', 'anti-bot challenge cleared natively', { tabId, userId, vendor, kind: wall.kind || null });
+    return { resolved, wall };
+  }
+
+  egressRegistry.record(activeEgressName, vendor, 'blocked');
+  antibotWallsTotal.labels(vendor, wall.state, 'blocked').inc();
+
+  // A profile that keeps blocking this vendor becomes a dead end; the next
+  // launch uses the next best profile instead of failing the same way again.
+  let nextProfile = null;
+  if (CONFIG.antibot.autoRotate && egressRegistry.list().length > 1) {
+    nextProfile = egressRegistry.nextFor(vendor, activeEgressName);
+    if (nextProfile && nextProfile.name !== activeEgressName) {
+      egressRotationsTotal.labels(activeEgressName || 'none', nextProfile.name, vendor).inc();
+      log('warn', 'anti-bot wall: next browser launch moves to another egress profile', {
+        vendor,
+        from: activeEgressName,
+        to: nextProfile.name,
+        profileClass: nextProfile.class,
+      });
+      activeEgressName = nextProfile.name;
+    } else {
+      nextProfile = null;
+    }
+  }
+
+  const error = wallError(wall, {
+    egressClass: egressClass(),
+    triedProfiles: [activeEgressName].filter(Boolean),
+    attempts: 1,
+    url: tabState.page.url(),
+  });
+  if (nextProfile) {
+    error.hint = `The fleet will use egress profile "${nextProfile.name}" (${nextProfile.class}) on the next browser launch. Retrying from the same network class will repeat this block.`;
+  }
+  return {
+    resolved: 'blocked',
+    wall,
+    error,
+    nextProfile: nextProfile?.name || null,
+    drive: drive ? { outcome: drive.outcome, detail: drive.detail, selector: drive.selector || null, requestsSent: drive.requestsSent ?? null } : null,
+  };
+}
+
 const BROWSER_IDLE_TIMEOUT_MS = selectAllowedDuration(
   CONFIG.browserIdleTimeoutMs,
   [1_000, 30_000, 60_000, 300_000, 600_000, 1_800_000, 3_600_000],
@@ -1293,9 +1446,10 @@ async function launchBrowserInstance() {
   const externalGoliath = getExternalGoliathLaunch();
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const launchProxy = proxyPool
+    // A named egress profile (anti-bot network class) wins over the default pool.
+    const launchProxy = egressLaunchProxy() || (proxyPool
       ? proxyPool.getLaunchProxy(proxyPool.canRotateSessions ? `browser-${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}` : undefined)
-      : null;
+      : null);
 
     let localVirtualDisplay = null;
     let vdDisplay = undefined;
@@ -1932,6 +2086,7 @@ function createTabState(page) {
     actionContracts: new Map(),
     workflowSteps: [],
     handoff: null,
+    wall: null,
   };
 }
 
@@ -3259,7 +3414,11 @@ app.post('/tabs/:tabId/navigate', async (req, res) => {
         const navigateCurrentPage = async () => {
           tabState.lastRequestedUrl = targetUrl;
           const ac = tabState.navigateAbort = new AbortController();
-          const gotoP = withPageLoadDuration('navigate', () => tabState.page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }));
+          const gotoP = withPageLoadDuration('navigate', async () => {
+            const navResponse = await tabState.page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+            tabState.lastNavResponse = navResponse || null;
+            return navResponse;
+          });
           try {
             await Promise.race([
               gotoP,
@@ -3349,9 +3508,25 @@ app.post('/tabs/:tabId/navigate', async (req, res) => {
         if (isGoogleSearch && await isGoogleSearchBlocked(tabState.page)) {
           return { ok: false, tabId, url: tabState.page.url(), refsAvailable: false, googleBlocked: true };
         }
-        
+
+        // Anti-bot wall: a silent block and a visible challenge both land here.
+        // The state is recorded on the tab, a visible challenge is driven through
+        // the native input layer, and an unbeatable wall surfaces the typed code
+        // so the caller routes around it instead of retrying into the block.
+        try {
+          const wall = await observeWall(tabState, { stage: 'navigate', response: tabState.lastNavResponse, settleMs: CONFIG.antibot.settleMs });
+          if (wallIsBlocking(wall)) await handleWall(tabState, wall, { userId, tabId });
+        } catch (wallErr) {
+          log('warn', 'anti-bot wall check failed during navigate', { reqId: req.reqId, tabId, error: wallErr.message });
+        }
+
         tabState.refs = await buildRefs(tabState.page);
-        return { ok: true, tabId, url: tabState.page.url(), refsAvailable: tabState.refs.size > 0 };
+        const navigateResult = { ok: true, tabId, url: tabState.page.url(), refsAvailable: tabState.refs.size > 0 };
+        if (tabState.wall) {
+          navigateResult.wall = tabState.wall;
+          if (tabState.wall.blocking) navigateResult.code = `${tabState.wall.vendor || 'antibot'}:blocked`;
+        }
+        return navigateResult;
       }, requestTimeoutMs());
     })(), requestTimeoutMs(), 'navigate'));
     
@@ -3468,6 +3643,192 @@ app.post('/tabs/:tabId/navigate', async (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
+// Anti-bot wall state for a tab. Agents branch on `code` (`perimeterx:blocked`,
+// `datadome:blocked`, ...) instead of retrying into the same block.
+/**
+ * @openapi
+ * /tabs/{tabId}/wall:
+ *   get:
+ *     tags: [Content]
+ *     summary: Anti-bot wall state
+ *     description: >-
+ *       Reports the anti-bot wall on the current page: vendor, state
+ *       (none/clear/challenge/silent), the challenge kind when one is visible,
+ *       and the egress profile that is in use. `code` is present and blocking is
+ *       true when the wall is unbeatable from the current network class.
+ *     parameters:
+ *       - name: tabId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - name: userId
+ *         in: query
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Wall state.
+ *       404:
+ *         description: Tab not found.
+ */
+app.get('/tabs/:tabId/wall', async (req, res) => {
+  try {
+    const userId = req.query.userId;
+    if (!userId) return res.status(400).json({ error: 'userId required' });
+    const session = sessions.get(normalizeUserId(userId));
+    const found = session && findTab(session, req.params.tabId);
+    if (!found) return tabNotFoundResponse(res, req.params.tabId);
+    session.lastAccess = Date.now();
+    const { tabState } = found;
+
+    let wall = null;
+    try {
+      const detected = await detectWall(tabState.page);
+      wall = detected && detected.state !== 'clear' ? detected : null;
+      if (wall) {
+        tabState.wall = {
+          ...wallSummary(wall),
+          kind: wall.kind || null,
+          stage: 'inspect',
+          egressClass: egressClass(),
+          egressProfile: activeEgressName,
+          detectedAt: new Date().toISOString(),
+        };
+      } else {
+        tabState.wall = null;
+      }
+    } catch (err) {
+      log('warn', 'wall inspection failed', { reqId: req.reqId, tabId: req.params.tabId, error: err.message });
+    }
+
+    const body = {
+      url: tabState.page.url(),
+      wall: tabState.wall || { vendor: null, state: 'none', blocking: false, kind: null },
+      egress: { profile: activeEgressName, class: egressClass() },
+    };
+    if (tabState.wall?.blocking) body.code = `${tabState.wall.vendor || 'antibot'}:blocked`;
+    res.json(body);
+  } catch (err) {
+    handleRouteError(err, req, res);
+  }
+});
+
+// Drive a visible challenge with the native input layer (real pointer path and
+// press cadence), never with an injected click that vendors fingerprint.
+/**
+ * @openapi
+ * /tabs/{tabId}/wall/solve:
+ *   post:
+ *     tags: [Interaction]
+ *     summary: Drive a visible anti-bot challenge
+ *     description: >-
+ *       Drives the visible challenge (for example a PerimeterX press-and-hold)
+ *       through the humanized input layer and reports whether it cleared.
+ *     security:
+ *       - BearerAuth: []
+ *     parameters:
+ *       - name: tabId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [userId]
+ *             properties:
+ *               userId:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Challenge driven; `outcome` is cleared, blocked or not-applicable.
+ *       404:
+ *         description: Tab not found.
+ */
+app.post('/tabs/:tabId/wall/solve', async (req, res) => {
+  const tabId = req.params.tabId;
+  try {
+    const userId = req.body?.userId;
+    if (!userId) return res.status(400).json({ error: 'userId required' });
+    const session = sessions.get(normalizeUserId(userId));
+    const found = session && findTab(session, tabId);
+    if (!found) return tabNotFoundResponse(res, tabId);
+    session.lastAccess = Date.now();
+    const { tabState } = found;
+
+    const result = await withUserLimit(userId, () => withTimeout((async () => {
+      const wall = await observeWall(tabState, { stage: 'solve' });
+      const egress = { profile: activeEgressName, class: egressClass() };
+      if (!wallIsBlocking(wall)) {
+        return { outcome: 'not-applicable', detail: 'no anti-bot wall on this page', wall: tabState.wall || null, egress };
+      }
+      // One code path for driving, recording and fleet rotation, shared with
+      // navigate/click/snapshot so a wall is handled the same way everywhere.
+      const handled = await handleWall(tabState, wall, { userId, tabId });
+      if (handled?.resolved === 'challenge_cleared') {
+        return { outcome: 'cleared', wall: tabState.wall || null, egress: { profile: activeEgressName, class: egressClass() } };
+      }
+      return {
+        outcome: 'blocked',
+        code: handled?.error?.code || `${wall.vendor || 'antibot'}:blocked`,
+        wall: tabState.wall || null,
+        driveOutcome: handled?.drive?.outcome || null,
+        driveDetail: handled?.drive?.detail || null,
+        hint: handled?.error?.hint || null,
+        nextProfile: handled?.nextProfile || null,
+        egress: { profile: activeEgressName, class: egressClass() },
+      };
+    })(), requestTimeoutMs(), 'wall-solve'));
+
+    res.json(result);
+  } catch (err) {
+    log('error', 'wall solve failed', { reqId: req.reqId, tabId, error: err.message });
+    handleRouteError(err, req, res);
+  }
+});
+
+// Which egress profile the fleet is using and how each one has fared per vendor.
+/**
+ * @openapi
+ * /egress:
+ *   get:
+ *     tags: [System]
+ *     summary: Fleet egress profiles and recorded anti-bot outcomes
+ *     description: >-
+ *       Returns the active egress profile and a matrix of what each profile has
+ *       cleared or been blocked by, per anti-bot vendor.
+ *     responses:
+ *       200:
+ *         description: Egress profile matrix.
+ */
+app.get('/egress', async (req, res) => {
+  try {
+    res.json({
+      active: activeEgressName,
+      class: egressClass(),
+      profiles: egressRegistry.list().map(({ password, ...profile }) => profile),
+      matrix: egressRegistry.matrix(),
+      deadEnds: egressRegistry.matrix().flatMap(row => Object.entries(row.vendors)
+        .filter(([, record]) => (record.blocked || 0) >= 2 && !(record.cleared > 0))
+        .map(([vendor, record]) => ({ profile: row.name, class: row.class, vendor, blocked: record.blocked }))),
+      limits: {
+        detectOnNavigation: CONFIG.antibot.detectOnNavigation,
+        driveChallenges: CONFIG.antibot.driveChallenges,
+        autoRotate: CONFIG.antibot.autoRotate,
+        maxRotations: CONFIG.antibot.maxRotations,
+      },
+    });
+  } catch (err) {
+    log('error', 'egress report failed', { reqId: req.reqId, error: err.message });
+    handleRouteError(err, req, res);
+  }
+});
+
 app.get('/tabs/:tabId/snapshot', async (req, res) => {
   try {
     const userId = req.query.userId;
@@ -3497,6 +3858,10 @@ app.get('/tabs/:tabId/snapshot', async (req, res) => {
       const cached = applyFilter(tabState.lastSnapshot);
       const win = windowSnapshot(cached.yaml, offset, windowChars);
       const response = { url: tabState.page.url(), snapshot: win.text, refsCount: tabState.refs.size, truncated: win.truncated, totalChars: win.totalChars, hasMore: win.hasMore, nextOffset: win.nextOffset, ...cached.extra };
+      if (tabState.wall) {
+        response.wall = tabState.wall;
+        if (tabState.wall.blocking) response.code = `${tabState.wall.vendor || 'antibot'}:blocked`;
+      }
       if (req.query.includeScreenshot === 'true') {
         const pngBuffer = await tabState.page.screenshot({ type: 'png' });
         response.screenshot = { data: pngBuffer.toString('base64'), mimeType: 'image/png' };
@@ -3552,6 +3917,16 @@ app.get('/tabs/:tabId/snapshot', async (req, res) => {
         return response;
       }
 
+      // Snapshot is where an agent looks when an action did nothing: report the
+      // wall rather than handing back an innocent-looking page. A visible
+      // challenge is not driven here; the caller uses wall/solve explicitly.
+      try {
+        const wall = await observeWall(tabState, { stage: 'snapshot' });
+        if (wallIsBlocking(wall)) await handleWall(tabState, wall, { userId, tabId: req.params.tabId, allowDrive: false });
+      } catch (wallErr) {
+        log('debug', 'anti-bot wall check failed during snapshot', { reqId: req.reqId, tabId: req.params.tabId, error: wallErr.message });
+      }
+
       const ariaContexts = await captureAriaContexts(tabState.page);
       tabState.refs = buildRefsFromContexts(ariaContexts);
       const annotatedYaml = redactSecretValues(formatAriaContexts(ariaContexts, tabState.refs), session);
@@ -3571,6 +3946,10 @@ app.get('/tabs/:tabId/snapshot', async (req, res) => {
         nextOffset: win.nextOffset,
         ...fresh.extra,
       };
+      if (tabState.wall) {
+        response.wall = tabState.wall;
+        if (tabState.wall.blocking) response.code = `${tabState.wall.vendor || 'antibot'}:blocked`;
+      }
 
       if (req.query.includeScreenshot === 'true') {
         const pngBuffer = await tabState.page.screenshot({ type: 'png' });
@@ -4357,6 +4736,18 @@ app.post('/tabs/:tabId/click', async (req, res) => {
     if (result.approvalRequired) return refuseDangerous(req, res, { userId, tabId, dangerous: result.approvalRequired, route: 'click', extra: { ref, selector } });
     if (!inputConfig.enabled) recordBehaviorEvent(tabState.behavior, 'click', { mode: 'direct' });
     result.input = inputResult;
+    // A wall that appears with the click (PerimeterX serves its interstitial on
+    // the action, not on load) means the click produced nothing usable.
+    try {
+      const wall = await observeWall(tabState, { stage: 'click' });
+      if (wallIsBlocking(wall)) await handleWall(tabState, wall, { userId: req.body.userId, tabId });
+    } catch (wallErr) {
+      log('warn', 'anti-bot wall check failed after click', { reqId: req.reqId, tabId, error: wallErr.message });
+    }
+    if (tabState.wall) {
+      result.wall = tabState.wall;
+      if (tabState.wall.blocking) result.code = `${tabState.wall.vendor || 'antibot'}:blocked`;
+    }
     result.behavior = behaviorReport(tabState.behavior);
     if (dangerousAnnotation) result.dangerous = dangerousAnnotation;
     log('info', 'clicked', { reqId: req.reqId, tabId, url: result.url, inputMode: inputResult.mode });
