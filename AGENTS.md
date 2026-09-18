@@ -10,24 +10,24 @@ npm install && npm start
 # Server runs on http://localhost:9377
 ```
 
-## Release and CI on this repository
+## Release on this repository: no GitHub Actions, ever
 
-GitHub Actions is billing-locked here: every workflow job stops with "the job
-was not started because your account is locked due to a billing issue". Never
-wait on Actions on this repository, and never hold a change back because a
-required check is missing. Run the gates locally against the exact candidate
-and push.
+GitHub Actions is never used on this repository -- no CI, no checks, no
+workflow dispatch, no publish job. The `.github/workflows` directory is gone on
+purpose and must not come back. Never wait on an Actions run, never open one,
+and never hold a change back because a check is missing. Run the gates locally
+against the exact candidate, then push.
 
 ```bash
 npm run build && npm test
 npm run generate-openapi && git diff --exit-code openapi.json
 git diff --exit-code -- plugin.js dist/plugin.js
-npm pack --dry-run   # the CI script checks this output for forbidden files
+npm pack --dry-run   # inspect this output yourself for forbidden files
 ```
 
 Then merge the change directly (admin merge when branch protection blocks on
-checks that cannot start) and push the release tag yourself. When the publish
-workflow cannot run, publish with `npm publish --access public --provenance`
+checks that no longer exist) and push the release tag and GitHub release
+yourself. Publishing is local too: `npm publish --access public --provenance`
 from a machine logged in to the `@mechanica-labs` scope.
 
 ## Core Workflow
@@ -266,7 +266,7 @@ npx jest tests/unit/openapi.test.js
 
 Before any version bump, package publish, tag, or GitHub release:
 
-- Review every contributor change included in the release against the latest `main`. Do not rely on the pull request description or green CI alone.
+- Review every contributor change included in the release against the latest `main`. Do not rely on the pull request description alone; there is no CI here to confirm it.
 - Reproduce the claimed fix and test the failure boundaries, including limits, redirects, malformed input, and security-sensitive data flow when relevant.
 - Run `npm run audit:security`, `npm run build`, `npm run generate-openapi`, `npm test`, and the relevant live or end-to-end tests on the complete release candidate.
 - Inspect the package contents and confirm the version is consistent in every published manifest and generated file.
@@ -275,9 +275,9 @@ Before any version bump, package publish, tag, or GitHub release:
 ## npm Releases
 
 - The npm package source of truth is the public repo remote `https://github.com/Mechanica-Labs/goliath.git`, normally available locally as the `public` git remote. Do not publish from the private archive workspace path or from the wrong browser/login flow.
-- For each npm release, first land the package/version changes on public `main`, create or update the public GitHub release tag, and run `.github/workflows/publish.yml` from `Mechanica-Labs/goliath`.
-- Preferred publishing is npm trusted publishing through GitHub Actions. The npm trusted publisher must match: owner `Mechanica-Labs`, repo `goliath`, workflow `publish.yml`, with no environment unless the workflow adds one.
-- If trusted publishing is not configured and the release must ship immediately, use an explicit local fallback script under `.context/` that publishes from a detached worktree of `public/main`, runs the full release gate, dry-runs `npm pack`, asks for terminal confirmation, prompts for the npm OTP, publishes with `npm publish --access public --tag latest --otp=...`, and verifies `npm view` afterward.
+- For each npm release, first land the package/version changes on public `main`, then create or update the public GitHub release tag. Never run or wait on `.github/workflows/publish.yml`; it is deleted and Actions is never used here.
+- Publishing is always local. Run `npm publish --access public --provenance` from a machine logged in to the `@mechanica-labs` scope. npm trusted publishing through GitHub Actions is not used and must not be re-enabled.
+- Publish from a detached worktree of `public/main`: run the full release gate, dry-run `npm pack`, then publish with `npm publish --access public --tag latest` (add `--otp=...` if the registry asks) and verify with `npm view` afterward. Keep any helper script under `.context/`.
 - Never guess between local npm auth, private archive workflows, and public repo workflows. Check git history and `git remote -v` first, then state the chosen path before publishing.
 
 ## Docker

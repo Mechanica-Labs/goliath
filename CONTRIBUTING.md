@@ -23,7 +23,7 @@ Thanks for helping build Goliath. The repo is public and open to anyone — **no
 4. **Make your change.** Keep it focused — one change per PR is easier to review than a grab-bag.
 5. **Push to your fork** and open a pull request against `main` from the GitHub UI.
 
-That's it. CI runs automatically, and a maintainer reviews and merges if everything passes.
+That's it. There is no CI on this repository: a maintainer reviews the diff, runs the gates locally, and merges if everything passes.
 
 ## Development setup
 
@@ -57,7 +57,7 @@ Before you open a PR, confirm:
 ## Rules of the road
 
 - **PRs target `main` only.** Never push directly to `main`, never force-push, never delete branches that are under review.
-- **`main` is protected.** Every PR must pass the required status checks (`test`, `package-check`) and get an approving review before it can be merged.
+- **`main` is protected.** A maintainer runs the gates locally (`npm test`, `npm run build`, `npm run generate-openapi`) and approves the change before it can be merged; this repository has no automated status checks.
 - **Keep upstream attribution intact.** If your change touches code derived from an upstream project, leave `LICENSE` and `NOTICE.md` alone — attribution lives there, not in source comments.
 - **Be a good citizen.** Follow the [Code of Conduct](CODE_OF_CONDUCT.md) and don't commit secrets or anything you wouldn't want public.
 

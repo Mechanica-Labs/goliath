@@ -5,15 +5,9 @@ The primary installer is npm because Goliath already requires Node.js, while `go
 ## One-time npm setup
 
 1. Confirm the release owner can publish `@mechanica-labs/goliath`.
-2. Configure npm trusted publishing for GitHub Actions:
-   - package: `@mechanica-labs/goliath`
-   - repository: `Mechanica-Labs/goliath`
-   - workflow file: `publish.yml`
-   - permission: publish
-   - environment: blank, unless the workflow is later changed to use one
-3. Keep GitHub environment protection or required reviewers on release creation if the repository policy requires it.
+2. Log in to the `@mechanica-labs` scope on the machine that will publish (`npm login`, or set the token in the user-level `.npmrc`). Publishing is manual and local.
 
-The workflow authenticates through npm trusted publishing and publishes with npm provenance. Do not commit npm tokens, `.npmrc`, auth URLs, trusted-publisher record IDs, or account access records to this repo. Goliath declares npm's dual-use metadata because browser fingerprint controls and page evaluation can resemble security tooling.
+GitHub Actions is never used on this repository, so there is no CI workflow and no npm trusted-publisher record. Do not commit npm tokens, `.npmrc`, auth URLs, or account access records to this repo. Goliath declares npm's dual-use metadata because browser fingerprint controls and page evaluation can resemble security tooling.
 
 ## Release
 
@@ -22,7 +16,7 @@ npm version patch
 git push --follow-tags
 ```
 
-Create and publish the matching GitHub Release, or run the publish workflow manually from the public `Mechanica-Labs/goliath` repository. The workflow installs dependencies, then `prepublishOnly` runs the build, OpenAPI generation, and complete test suite before npm uploads a provenance-attested public package.
+Create and publish the matching GitHub Release, then publish from the logged-in machine. There is no workflow to run: `prepublishOnly` runs the build, OpenAPI generation, and complete test suite locally before npm uploads a provenance-attested public package.
 
 Verify the user path from a clean shell:
 
