@@ -80,6 +80,26 @@ Background state is stored in `.goliath/` beside the installed package or checko
 
 Bundled example skill: [headless event-platform operations](skills/luma-event-ops/SKILL.md), including email codes, authenticated feeds, and reliable state checks. Load this file into your harness explicitly; installation does not activate it automatically.
 
+## Field logs: add a post
+
+The [arcade field journal](site/index.html) is a self-contained static site. Copy
+[the sanitised example run record](site/examples/event-platform-run.json), replace
+its fields with actual observations, review every field and screenshot for private
+data, and set `reviewed: true`. Then publish locally with one command:
+
+```bash
+node site/publish.mjs path/to/reviewed-run.json
+```
+
+This creates a Markdown file under `site/posts/` and rebuilds the entry pages and
+index. It does not upload or deploy. Commit the reviewed sources and generated
+HTML together. Use `node site/serve.mjs` to preview, `node site/build.mjs` after
+manual Markdown edits, and `node --test site/tests/*.test.mjs` to check publishing.
+See [site/README.md](site/README.md) for the record schema, supported Markdown,
+screenshots, and GitHub Pages compatibility and deployment limits.
+
+## Browser operations
+
 Snapshots support `filter=interactive` (drops non-actionable text, keeps element refs, headings, iframe boundaries, and their tree ancestors — the response reports `fullChars` so the reduction is measurable) and `maxChars` (per-request window budget, paginated with `offset`).
 
 - Observe: accessibility snapshots, versioned semantic state, screenshots, links, images, structured extraction, downloads, and tab statistics.
