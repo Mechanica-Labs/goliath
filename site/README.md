@@ -75,29 +75,54 @@ node --test site/tests/*.test.mjs
 When deleting or renaming a post, also remove its old generated `.html` file;
 the builder does not delete files automatically.
 
-## Preview
+## Publish from the owner box
+
+The checked-in `site/` folder is plain HTML/CSS/JS and is ready to serve as-is.
+No build step, framework, hosting account, or package installation is needed to
+serve it. The existing offline Markdown builder is only for changing posts.
+Any static server can serve this folder; the provided launcher uses Node.js 22+
+and an installed `cloudflared` binary.
+
+From the owner box, run:
+
+```bash
+./site/serve.sh
+```
+
+You can also invoke the script by absolute path from any directory. It resolves
+the site folder relative to itself, starts its own static server bound **only to
+127.0.0.1:8801**, then runs exactly:
+
+```bash
+cloudflared tunnel --url http://127.0.0.1:8801 --no-autoupdate --logfile -
+```
+
+It scrapes the public `https://…trycloudflare.com` URL from the tunnel log and
+prints it as `Public site: …`. The URL is **ephemeral: it changes each run**.
+Keep the process running while sharing it. Ctrl+C stops both the tunnel and the
+site server. A permanent domain requires a **named Cloudflare tunnel**, configured
+separately with this same site-only origin. See [Cloudflare's quick-tunnel
+documentation](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/trycloudflare/).
+
+The tunnel must expose **only the `site/` folder**. Never point it at a gateway,
+dashboard, repository root, or any other service. The launcher has no configurable
+origin or document root. It refuses an occupied port rather than tunnelling an
+existing listener; the server rejects paths and symlinks escaping `site/`, hidden
+files, and directory listings. Keep only reviewed public material in `site/`.
+
+To prevent inherited routes, the launcher rejects existing cloudflared
+`config.yml`/`config.yaml` files in the usual user/system configuration directories
+and does not pass inherited `TUNNEL_*` options. It does not edit or delete those
+files: use an unconfigured account if necessary. Tunnel logs and any file named
+`-` produced by the requested logfile option stay in a private temporary directory
+outside the site and are removed on shutdown. If no URL arrives within 60 seconds,
+or either process fails, the launcher stops; it does not retry in the background.
+
+For a local preview without any tunnel:
 
 ```bash
 node site/serve.mjs
+# Open http://127.0.0.1:8801
 ```
 
-The preview server binds to `0.0.0.0`, uses `CONDUCTOR_PORT` when provided, and
-otherwise asks the operating system for an available port. It prints the URL.
-In Conductor use the forwarded URL for that port. Stop with Ctrl+C. The server
-serves only `site/`; it never serves private run records elsewhere in the repo.
-
-## Static hosting and GitHub Pages compatibility
-
-The checked-in `site/` directory is the complete static document root. Relative
-links work at `/` or a project subpath such as `/goliath/`. The `.nojekyll` file
-keeps the output as ordinary static files. Any static server can host it without
-a build service.
-
-GitHub Pages branch sources accept a branch root or `/docs`, not `/site`. To
-host this artifact there, a dedicated Pages branch would contain the contents
-of `site/` at its root. However, [GitHub documents that even branch-based Pages
-deployments use a managed Actions workflow run](https://docs.github.com/en/pages/getting-started-with-github-pages/configuring-a-publishing-source-for-your-github-pages-site).
-That conflicts with this repository's no-Actions policy. The files are
-Pages-compatible, but deploying to Pages requires a separate policy decision;
-do not enable or dispatch Actions under the existing rules. No Pages settings,
-CI wiring, workflow files, or deployment are changed by this feature.
+No Vercel, hosted site platform, Pages deployment, or CI workflow is configured.

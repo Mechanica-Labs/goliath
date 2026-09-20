@@ -96,7 +96,8 @@ index. It does not upload or deploy. Commit the reviewed sources and generated
 HTML together. Use `node site/serve.mjs` to preview, `node site/build.mjs` after
 manual Markdown edits, and `node --test site/tests/*.test.mjs` to check publishing.
 See [site/README.md](site/README.md) for the record schema, supported Markdown,
-screenshots, and GitHub Pages compatibility and deployment limits.
+screenshots, and publishing from the owner box with `./site/serve.sh` through a
+Cloudflare quick tunnel. The launcher serves only `site/` on `127.0.0.1:8801`.
 
 ## Browser operations
 
