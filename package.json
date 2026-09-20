@@ -41,6 +41,7 @@
     "node": ">=22"
   },
   "files": [
+    "skills/luma-event-ops/SKILL.md",
     "bin/",
     "lib/",
     "scripts/",

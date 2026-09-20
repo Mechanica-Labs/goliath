@@ -78,6 +78,8 @@ Background state is stored in `.goliath/` beside the installed package or checko
 
 ## Agent capabilities
 
+Bundled example skill: [headless event-platform operations](skills/luma-event-ops/SKILL.md), including email codes, authenticated feeds, and reliable state checks. Load this file into your harness explicitly; installation does not activate it automatically.
+
 Snapshots support `filter=interactive` (drops non-actionable text, keeps element refs, headings, iframe boundaries, and their tree ancestors — the response reports `fullChars` so the reduction is measurable) and `maxChars` (per-request window budget, paginated with `offset`).
 
 - Observe: accessibility snapshots, versioned semantic state, screenshots, links, images, structured extraction, downloads, and tab statistics.
