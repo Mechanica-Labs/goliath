@@ -5,6 +5,20 @@ remote assets, paid services, or build dependencies. Node.js 22+ is enough to
 build and publish offline. Generated HTML is checked in, so the site also reads
 without JavaScript. The optional CRT button stores only a local display preference.
 
+## Native artwork and crystal reveal
+
+The landing screen uses the repository's restored
+`assets/goliath-social-preview-1280x640.png`: the green Goliath wordmark, hands,
+and crystal ball. The builder copies this image byte-for-byte into `site/media/`
+so hosting never needs access outside the site folder. Header and crystal crops
+are CSS-only; the original artwork is not altered or redrawn.
+
+Press the crystal ball to reveal the journal from its center. Skip Intro and
+Escape reveal it immediately; Replay Crystal Intro opens it again. The intro
+appears once per browser tab when storage is available. Reduced motion and CRT
+FX off disable the zoom. Without JavaScript, all journal content and navigation
+remain visible with no intro gate.
+
 ## Add a post from a run
 
 1. Copy `site/examples/event-platform-run.json` to a private working location.
