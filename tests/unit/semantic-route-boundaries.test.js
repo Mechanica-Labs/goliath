@@ -135,6 +135,58 @@ afterAll(async () => {
   await fs.rm(__testing.config.checkpointsDir, { recursive: true, force: true });
 });
 
+test('assistance preserves tab ownership and rejects requests before screenshot capture', async () => {
+  const { session, tabState } = makeSemanticIframeSession('assist-owner');
+  tabState.page.screenshot = jest.fn();
+  __testing.sessions.set('owner', session);
+  await expect(request('/tabs/assist-owner/assist', { method: 'POST', body: {
+    userId: 'other-user', provider: 'subq', mode: 'vision', screenshot: true,
+    questions: { x: { type: 'noul', instructions: 'Is a button visible?' } },
+  } })).resolves.toMatchObject({ status: 404 });
+  const previousKey = __testing.config.subqApiKey;
+  try {
+    __testing.config.subqApiKey = 'unit-test-key';
+    await expect(request('/tabs/assist-owner/assist', { method: 'POST', body: {
+      userId: 'owner', provider: 'subq', mode: 'vision',
+      questions: { x: { type: 'noul', instructions: 'Is a button visible?' } },
+    } })).resolves.toMatchObject({ status: 400 });
+    expect(tabState.page.screenshot).not.toHaveBeenCalled();
+  } finally { __testing.config.subqApiKey = previousKey; }
+});
+
+test.each([false, true])('assistance rejects stale results after page change=%s', async changePage => {
+  const { session, mainUrl } = makeSemanticIframeSession('assist-freshness');
+  __testing.sessions.set('owner', session);
+  const actualFetch = global.fetch;
+  const oldKey = __testing.config.subqApiKey;
+  const providerCalls = [];
+  try {
+    __testing.config.subqApiKey = 'unit-test-key';
+    global.fetch = async (url, options) => {
+      if (url !== 'https://api.subq.ai/v1/systemone') return actualFetch(url, options);
+      const sent = JSON.parse(options.body);
+      providerCalls.push(sent);
+      const probabilities = Object.fromEntries(Object.keys(sent.questions.title.criteria).map((key, index) => [key, index === 0 ? 0.99 : key === 'none' ? 0.01 : 0]));
+      if (changePage) mainUrl.value = 'https://allowed.example/changed';
+      return new Response(JSON.stringify({ model: 'subq-snap-preview', answers: {
+        title: { type: 'choice', choice: 'c0', confidence: 0.99, probabilities },
+      } }));
+    };
+    const result = await request('/tabs/assist-freshness/assist', { method: 'POST', body: {
+      userId: 'owner', provider: 'subq', mode: 'extract', goal: 'Read the page title', fields: { title: 'Page title' },
+    } });
+    expect(providerCalls).toHaveLength(1);
+    expect(providerCalls[0].images).toBeUndefined();
+    if (changePage) {
+      expect(result).toMatchObject({ status: 409, body: { ok: false } });
+      expect(result.body.selections).toBeUndefined();
+    } else {
+      expect(result).toMatchObject({ status: 200, body: { ok: true, provider: 'subq', selections: { title: { status: 'matched', value: 'Checkout' } } } });
+      expect(result.body.selections.title.provenance.snapshotId).toBe(result.body.snapshotId);
+    }
+  } finally { global.fetch = actualFetch; __testing.config.subqApiKey = oldKey; }
+});
+
 test('handoff request queued before click and hands mutations pauses them atomically', async () => {
   const tabId = 'atomic-tab';
   const { session, page } = makeSession(tabId);

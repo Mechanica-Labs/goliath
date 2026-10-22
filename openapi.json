@@ -1353,6 +1353,109 @@
         }
       }
     },
+    "/tabs/{tabId}/assist": {
+      "post": {
+        "tags": [
+          "Content"
+        ],
+        "summary": "Opt-in Jev or SubQ decisions over current page candidates or a screenshot",
+        "description": "Select an observed link, extract verbatim candidate text, or ask typed image questions. Never clicks or navigates. Images are experimental and sent only with explicit screenshot consent.",
+        "parameters": [
+          {
+            "name": "tabId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "userId",
+                  "provider",
+                  "mode"
+                ],
+                "properties": {
+                  "userId": {
+                    "type": "string"
+                  },
+                  "provider": {
+                    "type": "string",
+                    "enum": [
+                      "jev",
+                      "subq"
+                    ]
+                  },
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "select",
+                      "extract",
+                      "vision"
+                    ]
+                  },
+                  "goal": {
+                    "type": "string",
+                    "maxLength": 2000,
+                    "description": "Required for select and extract."
+                  },
+                  "fields": {
+                    "type": "object",
+                    "maxProperties": 16,
+                    "additionalProperties": {
+                      "type": "string",
+                      "maxLength": 1000
+                    },
+                    "description": "Required for extract."
+                  },
+                  "screenshot": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Explicit consent to send a viewport PNG to the selected provider. Required for vision."
+                  },
+                  "questions": {
+                    "type": "object",
+                    "maxProperties": 16,
+                    "description": "Required for vision. Named noul",
+                    "choice": null,
+                    "score or Jev-only box questions with instructions and type-specific criteria.": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Typed answers with probabilities, provider and model, timing, snapshot identity and grounded selections. Uncertain selections contain no usable ref or value."
+          },
+          "400": {
+            "description": "Invalid provider, mode or questions."
+          },
+          "404": {
+            "description": "Owned tab not found."
+          },
+          "409": {
+            "description": "Page or screenshot changed while the provider was answering."
+          },
+          "413": {
+            "description": "Candidate or image budget exceeded."
+          },
+          "502": {
+            "description": "Provider unavailable or returned an invalid answer."
+          },
+          "503": {
+            "description": "Selected provider credentials are not configured."
+          }
+        }
+      }
+    },
     "/tabs/{tabId}/events": {
       "get": {
         "tags": [
