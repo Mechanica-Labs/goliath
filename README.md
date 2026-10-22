@@ -429,7 +429,9 @@ require unchanged pixels, so animated pages may need to settle before retrying.
 Jev uses `jev-1.14.0` and its experimental image header/assets protocol. Its
 `box` answers contain normalized image edges and confidence. SubQ uses
 `subq-snap-preview`, supporting `noul`, `choice` and `score`, with PNG images.
-Both accept images up to this integration's 4 MiB limit. These decision APIs
+Both accept images up to this integration's 4 MiB limit. Jev requires viewport
+dimensions between 280 and 1568 pixels on each axis; adjust the viewport first
+when outside that range. These decision APIs
 provide classification, selection and localization, not general OCR or prose
 transcription. Vision remains experimental. Timing is returned as `elapsedMs`;
 no navigation or scraping speed improvement is claimed without a benchmark.

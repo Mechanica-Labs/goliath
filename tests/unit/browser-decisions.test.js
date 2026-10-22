@@ -2,10 +2,11 @@ import { test, expect, jest } from '@jest/globals';
 import { askBrowserDecisions, prepareBrowserAssistance, validateDecisionAnswers, groundBrowserAnswers } from '../../lib/browser-decisions.js';
 import { buildRequest } from '../../mcp/tool-contracts.mjs';
 import { loadConfig } from '../../lib/config.js';
+import { PNG } from 'pngjs';
 
 const config = { typesafeApiKey: 'test-jev', subqApiKey: 'test-subq' };
 const questions = { visible: { type: 'noul', instructions: 'Is a red button visible?' } };
-const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jXioAAAAASUVORK5CYII=', 'base64');
+const png = PNG.sync.write(new PNG({ width: 280, height: 280 }));
 const response = (answers = { visible: { type: 'noul', noul: 0.99 } }, model = 'model-test') =>
   new Response(JSON.stringify({ model, answers }));
 const snapshot = {
@@ -99,6 +100,7 @@ test('enforces screenshot consent, candidate budgets, field and image limits', a
   expect(() => prepareBrowserAssistance({ provider: 'jev', mode: 'select', goal: 'pricing' }, { nodes: Array(129).fill(snapshot.nodes[0]) })).toThrow('128');
   expect(() => prepareBrowserAssistance({ provider: 'jev', mode: 'extract', goal: 'pricing', fields: {} }, snapshot)).toThrow('fields');
   await expect(askBrowserDecisions({ provider: 'jev', config, state: '', questions, image: Buffer.alloc(4 * 1024 * 1024 + 1) })).rejects.toMatchObject({ status: 400 });
+  await expect(askBrowserDecisions({ provider: 'jev', config, state: '', questions, image: PNG.sync.write(new PNG({ width: 279, height: 280 })) })).rejects.toThrow('280 to 1568');
 });
 
 test.each([401, 429, 500])('upstream HTTP %s errors never echo response bodies', async status => {
