@@ -81,6 +81,14 @@ test('field extraction can select observed text nodes without generating values'
   expect(prepared.questions.price.criteria.c1).toBe('text: $20');
 });
 
+test('field extraction preserves an observed value alongside its accessible label', () => {
+  const page = { ...snapshot, nodes: [{ ...snapshot.nodes[1], name: 'Monthly price', value: '$20' }] };
+  const prepared = prepareBrowserAssistance({ provider: 'jev', mode: 'extract', goal: 'Read pricing', fields: { price: 'Monthly amount' } }, page);
+  expect(prepared.questions.price.criteria.c0).toContain('observed value: $20');
+  const result = groundBrowserAnswers({ answers: { price: { type: 'choice', choice: 'c0', confidence: 0.99, probabilities: { c0: 0.99, none: 0.01 } } } }, prepared.candidates, page);
+  expect(result.selections.price).toMatchObject({ value: '$20', provenance: { selectedSource: 'value' } });
+});
+
 test('no-match stays distinct from an uncertain selected candidate', () => {
   const result = groundBrowserAnswers({ answers: { target: { type: 'choice', choice: 'none', confidence: 0.9, probabilities: { c0: 0.01, none: 0.99 } } } }, snapshot.nodes, snapshot);
   expect(result.selections.target).toMatchObject({ status: 'no_match', value: null });

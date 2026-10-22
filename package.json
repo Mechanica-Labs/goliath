@@ -235,11 +235,14 @@
     "qs": "6.16.0",
     "camoufox-js": {
       "ua-parser-js": "1.0.41"
+    },
+    "@istanbuljs/load-nyc-config": {
+      "js-yaml": "^4.1.1"
     }
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "jest": "^29.7.0",
+    "jest": "^30.5.2",
     "pngjs": "^7.0.0",
     "typescript": "^5.7.0"
   },
