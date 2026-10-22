@@ -19,7 +19,14 @@ function sourceFiles(dir) {
 }
 
 test('package uses the published Camoufox runtime and ships its CLIs', () => {
-  expect(manifest).toMatchObject({ name: '@mechanica-labs/goliath', version: '0.2.3', private: false });
+  expect(manifest).toMatchObject({ name: '@mechanica-labs/goliath', private: false });
+  expect(manifest.version).toMatch(/^\d+\.\d+\.\d+$/);
+  expect(lockfile.version).toBe(manifest.version);
+  expect(lockfile.packages[''].version).toBe(manifest.version);
+  for (const file of ['goliath.config.json', 'openclaw.plugin.json', 'openapi.json']) {
+    const metadata = JSON.parse(readFileSync(resolve(root, file), 'utf8'));
+    expect(file === 'openapi.json' ? metadata.info.version : metadata.version).toBe(manifest.version);
+  }
   expect(manifest.dependencies['camoufox-js']).toBeDefined();
   expect(manifest.dependencies['goliath-js']).toBeUndefined();
   const cli = resolve(root, manifest.bin.goliath);
