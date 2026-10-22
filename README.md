@@ -380,3 +380,61 @@ The behavior benchmark runs 26 local synthetic gates across semantic, spatial, t
 ## Licensing
 
 Goliath's original source is MIT licensed. Camoufox and `camoufox-js` are MPL-2.0 licensed; other dependencies retain their respective licenses. See [NOTICE.md](NOTICE.md).
+
+### Jev vision and SubQ browser assistance
+
+`goliath_assist` (REST `POST /tabs/:tabId/assist`) makes optional decisions over
+an owned tab. Set `TYPESAFE_API_KEY` for Jev or `SUBQ_API_KEY` for SubQ in the
+server environment. Each request explicitly chooses `provider: "jev"` or
+`provider: "subq"`. Existing browser tools never call these providers implicitly.
+
+Select a link for the agent's next navigation step:
+
+```json
+{"tabId":"YOUR_TAB","provider":"subq","mode":"select","goal":"Find the pricing page"}
+```
+
+Extract verbatim observed text for named fields:
+
+```json
+{"tabId":"YOUR_TAB","provider":"jev","mode":"extract","goal":"Read product pricing","fields":{"price":"Monthly price","plan":"Plan name"}}
+```
+
+Ask typed questions about the current viewport:
+
+```json
+{"tabId":"YOUR_TAB","provider":"jev","mode":"vision","screenshot":true,"questions":{"has_chart":{"type":"noul","instructions":"Does the screenshot contain a chart?"},"chart":{"type":"box","instructions":"Find the chart in screenshot"}}}
+```
+
+For REST, put the tab ID in the path and add `userId` to the JSON body instead
+of `tabId`. MCP and OpenClaw bind `userId` to the configured agent identity.
+
+Selection and extraction return original observed text, node/ref and snapshot
+provenance. They never click, navigate, invent URLs or generate field values.
+Only a selected candidate with probability at least 0.9 and confidence at least
+0.8 returns a usable ref/value. Other results are `uncertain` or `no_match`.
+Pages with more than 128 candidates are rejected rather than silently truncated.
+Narrow the page and retry, or use the existing deterministic extraction tools.
+At most 16 fields/questions are accepted. Candidate questions are limited to
+32 KiB combined; oversized requests fail explicitly.
+
+Page candidate labels and your goal go to the selected provider. Screenshots
+are sent only with explicit `screenshot: true`, including when used alongside
+selection/extraction. They can contain visible sensitive information. Use these
+calls only on pages you intend to share with that provider. No cross-provider
+fallback occurs. The server does not log provider payloads or expose keys.
+Page changes during a request cause a 409 response; screenshot requests also
+require unchanged pixels, so animated pages may need to settle before retrying.
+
+Jev uses `jev-1.14.0` and its experimental image header/assets protocol. Its
+`box` answers contain normalized image edges and confidence. SubQ uses
+`subq-snap-preview`, supporting `noul`, `choice` and `score`, with PNG images.
+Both accept images up to this integration's 4 MiB limit. These decision APIs
+provide classification, selection and localization, not general OCR or prose
+transcription. Vision remains experimental. Timing is returned as `elapsedMs`;
+no navigation or scraping speed improvement is claimed without a benchmark.
+
+Protocols: [TypeSafe images](https://docs.typesafe.ai/images),
+[TypeSafe Box](https://docs.typesafe.ai/primitives/box),
+[TypeSafe models](https://docs.typesafe.ai/models), and
+[SubQ Decisions API](https://docs.subq.ai/endpoints/decisions-api/).

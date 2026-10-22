@@ -187,6 +187,10 @@
       {
         "name": "goliath_import_cookies",
         "description": "Import Netscape cookie file (requires GOLIATH_API_KEY)"
+      },
+      {
+        "name": "goliath_assist",
+        "description": "Opt-in Jev and SubQ browser selection, grounded extraction and screenshot decisions"
       }
     ]
   },

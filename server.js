@@ -26,6 +26,7 @@ import {
 import { extractPageImages } from './lib/images.js';
 import { extractDeterministic, validateSchema as validateExtractSchema } from './lib/extract.js';
 import { extractSemantic, validateSemanticSchema } from './lib/extract.js';
+import { askBrowserDecisions, decisionProvider, prepareBrowserAssistance, groundBrowserAnswers, decisionError } from './lib/browser-decisions.js';
 import { buildSemanticSnapshot, createReadinessTracker } from './lib/semantic.js';
 import { planAction, validateContract, validatePostconditions, verifyPostconditions } from './lib/action-contracts.js';
 import { createCheckpoint, deleteCheckpoint, listCheckpoints, readCheckpoint } from './lib/checkpoints.js';
@@ -4012,6 +4013,86 @@ app.post('/tabs/:tabId/observe', express.json({ limit: '256kb' }), async (req, r
   } catch (err) {
     log('error', 'semantic observe failed', { reqId: req.reqId, error: err.message });
     handleRouteError(err, req, res);
+  }
+});
+
+/**
+ * @openapi
+ * /tabs/{tabId}/assist:
+ *   post:
+ *     tags: [Content]
+ *     summary: Opt-in Jev or SubQ decisions over current page candidates or a screenshot
+ *     description: Select an observed link, extract verbatim candidate text, or ask typed image questions. Never clicks or navigates. Images are experimental and sent only with explicit screenshot consent.
+ *     parameters:
+ *       - name: tabId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [userId, provider, mode]
+ *             properties:
+ *               userId: { type: string }
+ *               provider: { type: string, enum: [jev, subq] }
+ *               mode: { type: string, enum: [select, extract, vision] }
+ *               goal: { type: string, maxLength: 2000, description: Required for select and extract. }
+ *               fields: { type: object, maxProperties: 16, additionalProperties: { type: string, maxLength: 1000 }, description: Required for extract. }
+ *               screenshot: { type: boolean, default: false, description: Explicit consent to send a viewport PNG to the selected provider. Required for vision. }
+ *               questions: { type: object, maxProperties: 16, description: Required for vision. Named noul, choice, score or Jev-only box questions with instructions and type-specific criteria. }
+ *     responses:
+ *       200:
+ *         description: Typed answers with probabilities, provider and model, timing, snapshot identity and grounded selections. Uncertain selections contain no usable ref or value.
+ *       400:
+ *         description: Invalid provider, mode or questions.
+ *       404:
+ *         description: Owned tab not found.
+ *       409:
+ *         description: Page or screenshot changed while the provider was answering.
+ *       413:
+ *         description: Candidate or image budget exceeded.
+ *       502:
+ *         description: Provider unavailable or returned an invalid answer.
+ *       503:
+ *         description: Selected provider credentials are not configured.
+ */
+app.post('/tabs/:tabId/assist', express.json({ limit: '256kb' }), async (req, res) => {
+  try {
+    const { userId, provider } = req.body;
+    if (typeof userId !== 'string' || !userId) return res.status(400).json({ error: 'userId required' });
+    const session = sessions.get(normalizeUserId(userId));
+    const found = session && findTab(session, req.params.tabId);
+    if (!found) return tabNotFoundResponse(res, req.params.tabId);
+    decisionProvider(provider, CONFIG);
+    // Check the request before reading the page or capturing any image.
+    prepareBrowserAssistance(req.body, { nodes: [] });
+    session.lastAccess = Date.now();
+    const result = await withUserLimit(userId, () => withTabLock(req.params.tabId, async () => {
+      const { tabState } = found;
+      const snapshot = await captureSemanticObservation(tabState, { session });
+      const prepared = prepareBrowserAssistance(req.body, snapshot);
+      if (!prepared.questions) return { ok: true, status: 'no_candidates', provider, snapshotId: snapshot.snapshotId, selections: {} };
+      const image = req.body.screenshot === true
+        ? await tabState.page.screenshot({ type: 'png', fullPage: false, timeout: 5000 }) : null;
+      const answer = await askBrowserDecisions({ provider, config: CONFIG, state: prepared.state, questions: prepared.questions, image });
+      const current = await captureSemanticObservation(tabState, { session });
+      if (current.url !== snapshot.url || current.stateHash !== snapshot.stateHash) throw decisionError('page changed; request assistance again', 409);
+      if (image) {
+        const currentImage = await tabState.page.screenshot({ type: 'png', fullPage: false, timeout: 5000 });
+        if (!image.equals(currentImage)) throw decisionError('screenshot changed; request assistance again', 409);
+      }
+      const output = req.body.mode === 'vision'
+        ? { ...answer, snapshotId: snapshot.snapshotId, stateHash: snapshot.stateHash, experimental: true }
+        : groundBrowserAnswers(answer, prepared.candidates, snapshot);
+      return { ok: true, ...output };
+    }));
+    res.json(result);
+  } catch (error) {
+    const status = [400, 409, 413, 502, 503].includes(error.status) ? error.status : 500;
+    res.status(status).json({ ok: false, error: status === 500 ? 'browser assistance failed' : error.message });
   }
 });
 

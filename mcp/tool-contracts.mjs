@@ -1,6 +1,7 @@
 import { resolve } from 'node:path';
 
 import { readCookieFile } from '../lib/cookies.js';
+import { BROWSER_ASSIST_SCHEMA } from '../lib/browser-decisions.js';
 
 const SEARCH_MACROS = [
   '@google_search',
@@ -40,6 +41,11 @@ const POSTCONDITIONS_SCHEMA = {
 };
 
 export const TOOL_DEFS = [
+  {
+    name: 'goliath_assist',
+    description: 'Ask Jev or SubQ to select an observed link, extract verbatim page fields, or judge a screenshot with typed questions. Explicit provider and screenshot consent required. Returns suggestions, never executes actions. Vision is experimental.',
+    inputSchema: BROWSER_ASSIST_SCHEMA,
+  },
   {
     name: 'goliath_create_tab',
     description:
@@ -430,6 +436,8 @@ export function buildRequest(name, args, ctx) {
     }
     case 'goliath_observe':
       return { method: 'POST', path: tabPath(args.tabId, '/observe'), responseKind: 'json', body: { ...without(args), userId } };
+    case 'goliath_assist':
+      return { method: 'POST', path: tabPath(args.tabId, '/assist'), responseKind: 'json', body: { ...without(args), userId } };
     case 'goliath_plan_action': {
       const { snapshotId, nodeId, kind, text, secretId, key, allowedOrigins } = args;
       return {

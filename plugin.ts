@@ -14,6 +14,7 @@ import { loadConfig } from "./lib/config.js";
 import { ensureBrowserInstalled } from "./lib/browser-install.js";
 import { launchServer } from "./lib/launcher.js";
 import { readCookieFile } from "./lib/cookies.js";
+import { BROWSER_ASSIST_SCHEMA } from "./lib/browser-decisions.js";
 
 const POSTCONDITIONS_SCHEMA = {
   type: "array", minItems: 1, maxItems: 20,
@@ -358,6 +359,20 @@ export default function register(api: PluginApi) {
       const { tabId, ...rest } = params as { tabId: string } & Record<string, unknown>;
       const userId = ctx.agentId || fallbackUserId;
       return toToolResult(await fetchApi(baseUrl, `/tabs/${tabId}/actions/execute`, {
+        method: "POST",
+        body: JSON.stringify({ ...rest, userId }),
+      }));
+    },
+  }));
+
+  api.registerTool((ctx: ToolContext) => ({
+    name: "goliath_assist",
+    description: "Ask Jev or SubQ to select an observed link, extract verbatim fields, or judge an explicitly requested screenshot. Returns suggestions without executing actions. Vision is experimental.",
+    parameters: BROWSER_ASSIST_SCHEMA,
+    async execute(_id, params) {
+      const { tabId, ...rest } = params as { tabId: string } & Record<string, unknown>;
+      const userId = ctx.agentId || fallbackUserId;
+      return toToolResult(await fetchApi(baseUrl, `/tabs/${encodeURIComponent(tabId)}/assist`, {
         method: "POST",
         body: JSON.stringify({ ...rest, userId }),
       }));
